@@ -1,0 +1,2 @@
+# Keep LF line endings on every platform; the Dockerfile, Makefile and CI all run on Linux.
+* text=auto eol=lf
