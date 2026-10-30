@@ -1,0 +1,42 @@
+name: holdfast
+
+x-holdfast-app: &holdfast-app
+  build: .
+  image: holdfast:local
+  environment:
+    DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@database:5432/holdfast
+
+services:
+  database:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: holdfast
+      POSTGRES_PASSWORD: holdfast
+      POSTGRES_DB: holdfast
+    ports:
+      - "5432:5432"
+    volumes:
+      - database-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=holdfast --dbname=holdfast"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  migrate:
+    <<: *holdfast-app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      database:
+        condition: service_healthy
+
+  api:
+    <<: *holdfast-app
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  database-data:
