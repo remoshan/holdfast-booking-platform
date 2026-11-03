@@ -21,6 +21,7 @@ format:
 lint:
 	uv run ruff check
 	uv run ruff format --check
+	uv run lint-imports
 
 typecheck:
 	uv run mypy

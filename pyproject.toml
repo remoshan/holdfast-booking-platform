@@ -10,9 +10,11 @@ requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.20.1",
     "asyncpg>=0.32.0",
+    "email-validator>=2.3.0",
     "fastapi>=0.162.0",
     "pydantic-settings>=2.16.2",
     "sqlalchemy[asyncio]>=2.1.6",
+    "tzdata>=2026.6",
     "uvicorn>=0.54.0",
 ]
 
@@ -23,6 +25,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "import-linter>=2.15",
     "mypy>=2.4.1",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
@@ -46,6 +49,37 @@ select = ["E", "W", "F", "I", "N", "UP", "B", "S", "C4", "SIM", "PT", "ASYNC", "
 strict = true
 plugins = ["pydantic.mypy"]
 files = ["src", "tests", "migrations"]
+# Name modules after their path (tests.unit.conftest), so the two conftest.py files don't clash.
+mypy_path = ["src"]
+explicit_package_bases = true
+
+[tool.importlinter]
+root_package = "holdfast"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers only import the layers below them"
+type = "layers"
+layers = [
+    "holdfast.main",
+    "holdfast.api",
+    "holdfast.services",
+    "holdfast.repositories",
+    "holdfast.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Routers reach the database only through services"
+type = "forbidden"
+source_modules = ["holdfast.api"]
+forbidden_modules = ["holdfast.repositories"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "The domain is free of frameworks"
+type = "forbidden"
+source_modules = ["holdfast.domain"]
+forbidden_modules = ["fastapi", "pydantic", "sqlalchemy", "starlette"]
 
 [tool.pytest]
 strict = true
