@@ -9,9 +9,9 @@ The name is the promise: a reservation hold that holds fast.
 
 ## Guarantees
 
-1. **No double-booking.** No two active bookings overlap on the same resource. The database enforces this, not just application code.
+1. **No double-booking.** No two active bookings overlap on the same resource. From Phase 2 the database enforces this, not just application code.
 2. **Tenant isolation.** A user can never read or change another organisation's data. Cross-tenant requests return `404`, so they leak nothing.
-3. **Holds expire.** A hold that is not paid for in time expires and frees the slot.
+3. **Holds expire.** From Phase 5, a hold that is not paid for in time expires and frees the slot.
 
 ## Roadmap
 
@@ -19,8 +19,8 @@ Each phase ends with a deployable system, a merged pull request and its architec
 
 | Phase | Focus | Status |
 | --- | --- | --- |
-| 0 | Foundations: Compose, CI, migrations, health check | In progress |
-| 1 | Core API: CRUD, availability search, problem+json errors | Planned |
+| 0 | Foundations: Compose, CI, migrations, health check | Done |
+| 1 | Core API: CRUD, availability search, problem+json errors | Done |
 | 2 | No double-booking: exclusion constraint, concurrency tests | Planned |
 | 3 | Authentication and per-organisation roles | Planned |
 | 4 | Data under pressure: indexes, query plans, pagination at depth | Planned |
@@ -34,10 +34,10 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | --- | --- |
 | Language and framework | Python 3.14, FastAPI |
 | Database | PostgreSQL 18 |
-| Data access and migrations | SQLAlchemy 2.0 (async, asyncpg), Alembic |
+| Data access and migrations | SQLAlchemy 2.1 (async, asyncpg), Alembic |
 | Settings and validation | Pydantic v2, pydantic-settings |
 | Testing | pytest, HTTPX, Testcontainers (real Postgres, never SQLite) |
-| Quality gates | Ruff, mypy (strict), pre-commit |
+| Quality gates | Ruff, mypy (strict), import-linter, pre-commit |
 | Packaging | uv |
 | Local environment | Docker Compose, Make |
 | CI | GitHub Actions |
@@ -63,7 +63,7 @@ The API is then available at <http://localhost:8000>, with interactive OpenAPI d
 | `make up` / `make down` | Start or stop the full stack in Docker |
 | `make migrate` | Apply new migrations to the running database |
 | `make format` | Format code and apply safe lint fixes |
-| `make lint` | Ruff lint and format check |
+| `make lint` | Ruff lint and format check, plus the layer import rules |
 | `make typecheck` | mypy in strict mode |
 | `make test` | Run the test suite (needs Docker for Testcontainers) |
 | `make check` | Lint, type-check and test: exactly what CI runs |
@@ -74,29 +74,100 @@ The API is then available at <http://localhost:8000>, with interactive OpenAPI d
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy URL with the asyncpg driver, e.g. `postgresql+asyncpg://user:password@host:5432/holdfast` |
 
+## API
+
+Every path that belongs to a tenant starts with `/organisations/{organisation_id}`, shortened to `…` below. The running API documents every request and response at `/docs`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Report whether the API can reach its database |
+| `POST` | `/users` | Create a user |
+| `GET` | `/users/{user_id}` | Get a user |
+| `POST`, `GET` | `/organisations` | Create or list organisations |
+| `GET`, `PUT`, `DELETE` | `/organisations/{organisation_id}` | Get, replace or delete an organisation |
+| `POST`, `GET` | `…/locations` | Create or list locations |
+| `GET`, `PUT`, `DELETE` | `…/locations/{location_id}` | Get, replace or delete a location |
+| `POST`, `GET` | `…/locations/{location_id}/resources` | Create or list a location's resources |
+| `GET`, `PUT`, `DELETE` | `…/resources/{resource_id}` | Get, replace or delete a resource |
+| `GET` | `…/resources/{resource_id}/availability?date=YYYY-MM-DD` | Free periods on a day in the location's time zone |
+| `POST`, `GET` | `…/resources/{resource_id}/bookings` | Book a resource or list its bookings |
+| `GET` | `…/bookings/{booking_id}` | Get a booking |
+| `POST` | `…/bookings/{booking_id}/cancel` | Cancel a booking |
+
+### Conventions
+
+- **Identity.** Booking needs an `X-User-ID` header naming an existing user. It stands in for authentication until Phase 3, so the API must not be exposed publicly before then.
+- **Updates.** `PUT` replaces every editable field. Deleting an organisation, location or resource that still has locations, resources or bookings is refused with `409`.
+- **Time.** Request timestamps must include a UTC offset, and responses are in UTC. Opening hours and booking rules use the location's time zone.
+- **Money.** Prices are integers in minor units, such as cents, of the organisation's currency. The currency is set when the organisation is created and never changes.
+- **Pagination.** Lists return `{"items": [...], "next_cursor": "..."}`. Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last page. `limit` is 1 to 100 and defaults to 20.
+
+### Booking rules
+
+A booking must:
+
+1. start and end on a 15-minute boundary in the location's local time;
+2. fall within the location's opening hours on a single day, so there are no overnight bookings;
+3. start no earlier than now and at most 30 days from today;
+4. not overlap an active booking of the same resource.
+
+A booking costs the resource's hourly price for the time that actually elapses, rounded half up to a whole minor unit. It can be cancelled until it starts, and cancelling it again changes nothing.
+
+### Errors
+
+Every error is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details document, sent as `application/problem+json`:
+
+```json
+{
+  "type": "https://github.com/remoshan/holdfast-booking-platform#invalid-booking",
+  "title": "Booking rule broken",
+  "status": 422,
+  "detail": "Bookings must start and end on a 15-minute boundary.",
+  "instance": "/organisations/0199.../resources/0199.../bookings"
+}
+```
+
+Errors that the HTTP status explains fully, such as `404 Not Found` or a `409 Conflict` for a taken slug, use the type `about:blank`. These problem types carry more meaning:
+
+#### validation-error
+
+`422`: the request is malformed. `errors` lists every invalid input, with a JSON `pointer` into the body or the name of the `parameter` or `header`.
+
+#### invalid-booking
+
+`422`: the booking breaks one of the booking rules; `detail` says which one.
+
+#### booking-conflict
+
+`409`: the resource is already booked for part of the requested period.
+
 ## Architecture
 
 Holdfast is a modular monolith with strict layers. Each layer may import only the layers below it.
 
 ```mermaid
 flowchart TD
-    api["api: routers and schemas"] --> services["services: use cases, transactions, permissions"]
-    services --> repositories["repositories: SQL and persistence"]
-    services --> domain["domain: entities and business rules"]
+    api["api: routers, schemas, problem details"] --> services["services: use cases, transactions"]
+    services --> repositories["repositories: table mappings and all SQL"]
+    services --> domain["domain: entities and booking rules"]
     repositories --> domain
 ```
 
-`core` holds cross-cutting infrastructure (configuration) and is available to every layer. The `services` and `domain` layers arrive with the first use cases in Phase 1.
+import-linter enforces the layers in CI: routers never import repositories, and the domain imports no framework. `core` holds cross-cutting infrastructure (configuration).
 
 ```text
 holdfast-booking-platform/
 ├── src/holdfast/
 │   ├── main.py            # application factory and lifespan
-│   ├── api/               # routers and request/response schemas
-│   ├── core/              # settings
-│   └── repositories/      # table mappings and SQL
+│   ├── api/               # routers, request/response schemas, problem details
+│   ├── services/          # use cases, one transaction each
+│   ├── domain/            # entities and booking rules, free of frameworks
+│   ├── repositories/      # table mappings and all SQL
+│   └── core/              # settings
 ├── migrations/            # Alembic environment and versioned migrations
-├── tests/integration/     # tests through HTTP against a real Postgres
+├── tests/
+│   ├── unit/              # domain rules, no database
+│   └── integration/       # through HTTP against a real Postgres
 ├── compose.yaml
 ├── Dockerfile
 └── Makefile
@@ -164,6 +235,57 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 **Decision.** UUIDv7 primary keys generated by PostgreSQL 18's built-in `uuidv7()` as the column default.
 
 **Consequences.** Keys are 16 bytes instead of 8, and a key reveals its row's creation time, which is acceptable here. Clients never choose IDs. PostgreSQL 18 or newer is required in every environment.
+
+</details>
+
+<details>
+<summary><strong>ADR-0004: Errors are RFC 9457 problem details</strong> (Accepted, 2026-10-31)</summary>
+
+**Context.** Clients need one predictable shape for every failure: invalid input, missing entities, broken booking rules and server faults. FastAPI's defaults use one body for validation errors and another for everything else.
+
+**Options considered.**
+
+1. *FastAPI's defaults.* No code, but two shapes, and validation errors echo the rejected input back, which could leak secrets once passwords arrive.
+2. *A custom envelope* such as `{"error": {"code": ..., "message": ...}}`. Simple, but every client has to learn a format that exists only here.
+3. *RFC 9457 problem details.* An IETF standard that HTTP tooling already understands, with room for extension members such as `errors`.
+
+**Decision.** Every error response is `application/problem+json`. Services raise domain errors, and one table in `api/errors.py` maps each to a status code. A problem that means more than its status code gets a type URI that resolves to its documentation in this README; the rest use `about:blank`. Validation problems point at each invalid input without echoing its value. Unexpected exceptions return a generic `500` problem while the traceback goes to the server log.
+
+**Consequences.** One error format everywhere, and OpenAPI documents every `4XX` and `5XX` response as a problem. Type URIs are part of the API contract, so they must stay stable even if the documentation moves.
+
+</details>
+
+<details>
+<summary><strong>ADR-0005: The organisation is part of the URL path</strong> (Accepted, 2026-10-31)</summary>
+
+**Context.** Every request for tenant data must name its organisation, so that repositories can scope their queries. The project brief suggested passing it in a header.
+
+**Options considered.**
+
+1. *An `X-Organisation-ID` header.* Shorter URLs, but organisation CRUD would still use paths, giving two styles, and the tenant would not show in URLs or access logs.
+2. *A path prefix, `/organisations/{organisation_id}`.* Explicit, uniform and visible in logs and links; the pattern GitHub uses for `/orgs/{org}`. URLs get longer.
+3. *A subdomain per tenant.* Needs DNS and TLS for every tenant, which is far more than this project needs.
+
+**Decision.** The path prefix, with shallow nesting: collections sit under their parent (`…/locations/{location_id}/resources`) and single items directly under the organisation (`…/resources/{resource_id}`). Every repository query on tenant data filters by `organisation_id`, and composite foreign keys such as `(organisation_id, location_id)` stop a row from ever referencing another tenant's row. Until Phase 3 adds authentication, an `X-User-ID` header names the user making a booking.
+
+**Consequences.** A request for another tenant's data finds nothing and returns `404`. Phase 3 only has to check that the caller is a member of the organisation in the path.
+
+</details>
+
+<details>
+<summary><strong>ADR-0006: Bookings are UTC ranges checked against local rules</strong> (Accepted, 2026-10-31)</summary>
+
+**Context.** Bookings must never overlap, must respect each location's opening hours in its own time zone, and must stay correct across daylight-saving changes. One organisation can have locations in several time zones.
+
+**Options considered.**
+
+1. *Separate start and end columns.* Familiar, but every overlap check becomes hand-written comparisons, and the Phase 2 exclusion constraint needs a single range value.
+2. *A `tstzrange` column in UTC.* Postgres understands range overlap (`&&`) natively and can index and constrain it.
+3. *Local wall-clock times.* Simple to display, but ambiguous across daylight-saving changes and between time zones.
+
+**Decision.** A booking's period is a half-open `[start, end)` `tstzrange` in UTC, so back-to-back bookings do not overlap. Each location has an IANA time zone and weekly opening hours in local wall-clock time, stored as a small JSONB value on the location because they are always read and replaced together. The booking rules are checked in local time, while durations and prices use elapsed UTC time.
+
+**Consequences.** Overlap and availability queries are range operations, ready for an exclusion constraint. A booking that spans a daylight-saving change is charged for the hours that actually pass. Overnight and multi-day bookings are not possible.
 
 </details>
 
