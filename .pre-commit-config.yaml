@@ -33,3 +33,9 @@ repos:
         language: system
         types_or: [python, pyi]
         pass_filenames: false
+      - id: import-linter
+        name: layer import rules
+        entry: uv run lint-imports
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false

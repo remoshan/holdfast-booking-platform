@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from importlib import metadata
 
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from holdfast.api.health import router as health_router
+from holdfast.api import bookings, health, locations, organisations, resources, users
+from holdfast.api.errors import PROBLEM_HANDLERS, PROBLEM_RESPONSES
 from holdfast.core.config import Settings
 
 
@@ -16,10 +17,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.engine = create_async_engine(str(settings.database_url))
+        engine = create_async_engine(str(settings.database_url))
+        app.state.engine = engine
+        app.state.sessions = async_sessionmaker(engine)
         yield
-        await app.state.engine.dispose()
+        await engine.dispose()
 
-    app = FastAPI(title="Holdfast", version=metadata.version("holdfast"), lifespan=lifespan)
-    app.include_router(health_router)
+    app = FastAPI(
+        title="Holdfast",
+        summary="Multi-tenant booking for shared spaces that never double-books.",
+        version=metadata.version("holdfast"),
+        lifespan=lifespan,
+        exception_handlers=PROBLEM_HANDLERS,
+        responses=PROBLEM_RESPONSES,
+    )
+    for router in (
+        health.router,
+        users.router,
+        organisations.router,
+        locations.router,
+        resources.router,
+        bookings.router,
+    ):
+        app.include_router(router)
     return app
