@@ -15,7 +15,7 @@ WEEKEND = (Weekday.SATURDAY, Weekday.SUNDAY)
 
 
 @pytest.fixture
-def location() -> Location:
+def amsterdam_location() -> Location:
     return Location(
         id=uuid4(),
         organisation_id=uuid4(),

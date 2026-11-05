@@ -31,15 +31,17 @@ def _booking(period: Period) -> Booking:
 
 
 def test_a_booking_within_opening_hours_is_accepted(
-    location: Location, local_period: LocalPeriod
+    amsterdam_location: Location, local_period: LocalPeriod
 ) -> None:
-    check_booking_rules(local_period(TUESDAY, "09:00", "10:30"), location, NOW)
+    check_booking_rules(local_period(TUESDAY, "09:00", "10:30"), amsterdam_location, NOW)
 
 
 def test_a_booking_on_the_last_day_of_the_horizon_is_accepted(
-    location: Location, local_period: LocalPeriod
+    amsterdam_location: Location, local_period: LocalPeriod
 ) -> None:
-    check_booking_rules(local_period(MONDAY + timedelta(days=30), "09:00", "10:00"), location, NOW)
+    check_booking_rules(
+        local_period(MONDAY + timedelta(days=30), "09:00", "10:00"), amsterdam_location, NOW
+    )
 
 
 @pytest.mark.parametrize(
@@ -54,10 +56,15 @@ def test_a_booking_on_the_last_day_of_the_horizon_is_accepted(
     ],
 )
 def test_a_booking_that_breaks_a_rule_is_rejected(
-    location: Location, local_period: LocalPeriod, day: date, start: str, end: str, rule: str
+    amsterdam_location: Location,
+    local_period: LocalPeriod,
+    day: date,
+    start: str,
+    end: str,
+    rule: str,
 ) -> None:
     with pytest.raises(InvalidBookingError, match=rule):
-        check_booking_rules(local_period(day, start, end), location, NOW)
+        check_booking_rules(local_period(day, start, end), amsterdam_location, NOW)
 
 
 @pytest.mark.parametrize(

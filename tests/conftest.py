@@ -1,5 +1,5 @@
-"""Integration fixtures: a disposable Postgres migrated to head, emptied after every test, and
-factories for the entities most tests need."""
+"""Fixtures for the suites that run against Postgres: a disposable database migrated to head and
+emptied after every test, plus factories for the entities most tests need."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
@@ -21,7 +21,7 @@ from holdfast.main import create_app
 from holdfast.repositories.records import Base
 
 POSTGRES_IMAGE = "postgres:18-alpine"
-PYPROJECT_PATH = Path(__file__).parents[2] / "pyproject.toml"
+PYPROJECT_PATH = Path(__file__).parents[1] / "pyproject.toml"
 TIMEZONE = "Europe/Amsterdam"
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 BOOKING_DAYS_AHEAD = 7  # Inside the booking horizon, and never in the past.
