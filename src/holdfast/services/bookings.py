@@ -6,7 +6,6 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from holdfast.domain.bookings import Booking, check_booking_rules, price_for
-from holdfast.domain.errors import BookingConflictError
 from holdfast.domain.pagination import Page
 from holdfast.domain.periods import Period
 from holdfast.repositories import bookings, locations, resources, users
@@ -20,10 +19,6 @@ async def book_resource(
         resource = await resources.get(session, organisation_id, resource_id)
         location = await locations.get(session, organisation_id, resource.location_id)
         check_booking_rules(period, location, now=datetime.now(UTC))
-        # Check-then-insert lets two concurrent requests both pass the check before either
-        # inserts. Phase 2 replaces it with an exclusion constraint enforced by Postgres.
-        if await bookings.active_periods(session, resource.id, period):
-            raise BookingConflictError("The resource is already booked for part of this period.")
         price = price_for(period, resource.hourly_price)
         return await bookings.add(session, organisation_id, resource.id, user_id, period, price)
 

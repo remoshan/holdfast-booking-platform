@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, Range
+from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, Range
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from holdfast.domain.bookings import BookingStatus
@@ -29,6 +29,7 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+NO_OVERLAP_CONSTRAINT = "ex_bookings_no_overlap"
 
 
 class Base(DeclarativeBase):
@@ -111,6 +112,15 @@ class BookingRecord(EntityRecord):
         ),
         CheckConstraint("NOT isempty(period)", name="period_not_empty"),
         CheckConstraint("price >= 0", name="price_not_negative"),
+        # Postgres rejects an active booking that overlaps another on the same resource, so
+        # concurrent requests can never both win. The condition mirrors INACTIVE_STATUSES.
+        ExcludeConstraint(
+            ("resource_id", "="),
+            ("period", "&&"),
+            name=NO_OVERLAP_CONSTRAINT,
+            using="gist",
+            where="status <> 'cancelled'",
+        ),
     )
 
     organisation_id: Mapped[UUID]

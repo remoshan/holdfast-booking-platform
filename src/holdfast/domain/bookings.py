@@ -18,8 +18,10 @@ class BookingStatus(StrEnum):
     CANCELLED = auto()
 
 
-ACTIVE_STATUSES = frozenset({BookingStatus.CONFIRMED})
-"""Statuses that hold a resource's time. Bookings in any other status leave the slot free."""
+INACTIVE_STATUSES = frozenset({BookingStatus.CANCELLED})
+"""Statuses whose bookings no longer hold their time. Every other status keeps the slot taken,
+so a status added later blocks overlapping bookings until it is deliberately listed here and in
+the database's exclusion constraint."""
 
 
 @dataclass(frozen=True, slots=True)
