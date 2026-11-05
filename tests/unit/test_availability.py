@@ -51,28 +51,30 @@ def test_a_fully_booked_window_has_no_free_periods(local_period: LocalPeriod) ->
 
 
 def test_today_is_bookable_from_the_next_grid_point(
-    location: Location, local_time: LocalTime, local_period: LocalPeriod
+    amsterdam_location: Location, local_time: LocalTime, local_period: LocalPeriod
 ) -> None:
     now = local_time(MONDAY, "09:07")
 
-    assert bookable_periods(location, MONDAY, [], now) == [local_period(MONDAY, "09:15", "18:00")]
+    assert bookable_periods(amsterdam_location, MONDAY, [], now) == [
+        local_period(MONDAY, "09:15", "18:00")
+    ]
 
 
 def test_closed_days_and_days_outside_the_horizon_have_no_bookable_periods(
-    location: Location, local_time: LocalTime
+    amsterdam_location: Location, local_time: LocalTime
 ) -> None:
     now = local_time(MONDAY, "09:00")
 
     for day in (SUNDAY, MONDAY - timedelta(days=7), MONDAY + timedelta(days=31)):
-        assert bookable_periods(location, day, [], now) == []
+        assert bookable_periods(amsterdam_location, day, [], now) == []
 
 
-def test_opening_hours_follow_daylight_saving_time(location: Location) -> None:
+def test_opening_hours_follow_daylight_saving_time(amsterdam_location: Location) -> None:
     now = datetime(2026, 10, 19, tzinfo=UTC)
 
     # 08:00 in Amsterdam is 06:00 UTC in summer time and 07:00 UTC after the clocks go back.
-    before = bookable_periods(location, date(2026, 10, 23), [], now)
-    after = bookable_periods(location, date(2026, 10, 26), [], now)
+    before = bookable_periods(amsterdam_location, date(2026, 10, 23), [], now)
+    after = bookable_periods(amsterdam_location, date(2026, 10, 26), [], now)
 
     assert before[0].start == datetime(2026, 10, 23, 6, 0, tzinfo=UTC)
     assert after[0].start == datetime(2026, 10, 26, 7, 0, tzinfo=UTC)

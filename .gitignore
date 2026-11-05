@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+.import_linter_cache/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/

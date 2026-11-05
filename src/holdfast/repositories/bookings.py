@@ -4,15 +4,15 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import Range
+from sqlalchemy.dialects.postgresql import Range, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from holdfast.domain.bookings import ACTIVE_STATUSES, Booking, BookingStatus
-from holdfast.domain.errors import NotFoundError
+from holdfast.domain.bookings import INACTIVE_STATUSES, Booking, BookingStatus
+from holdfast.domain.errors import BookingConflictError, NotFoundError
 from holdfast.domain.pagination import Page
 from holdfast.domain.periods import Period
 from holdfast.repositories.pagination import fetch_page
-from holdfast.repositories.records import BookingRecord
+from holdfast.repositories.records import NO_OVERLAP_CONSTRAINT, BookingRecord
 
 
 async def add(
@@ -23,16 +23,27 @@ async def add(
     period: Period,
     price: int,
 ) -> Booking:
-    record = BookingRecord(
-        organisation_id=organisation_id,
-        resource_id=resource_id,
-        user_id=user_id,
-        period=_to_range(period),
-        status=BookingStatus.CONFIRMED,
-        price=price,
+    """Insert a confirmed booking unless it overlaps an active booking of the same resource.
+
+    The exclusion constraint decides, so concurrent requests can never both win. Naming it in
+    ON CONFLICT DO NOTHING turns a lost race into "no row inserted". A plain INSERT would make
+    colliding transactions wait for each other, and Postgres would abort some as deadlocks.
+    """
+    record = await session.scalar(
+        insert(BookingRecord)
+        .values(
+            organisation_id=organisation_id,
+            resource_id=resource_id,
+            user_id=user_id,
+            period=_to_range(period),
+            status=BookingStatus.CONFIRMED,
+            price=price,
+        )
+        .on_conflict_do_nothing(constraint=NO_OVERLAP_CONSTRAINT)
+        .returning(BookingRecord)
     )
-    session.add(record)
-    await session.flush()
+    if record is None:
+        raise BookingConflictError("The resource is already booked for part of this period.")
     return _to_booking(record)
 
 
@@ -62,7 +73,7 @@ async def active_periods(session: AsyncSession, resource_id: UUID, window: Perio
     ranges = await session.scalars(
         select(BookingRecord.period).where(
             BookingRecord.resource_id == resource_id,
-            BookingRecord.status.in_(ACTIVE_STATUSES),
+            BookingRecord.status.not_in(INACTIVE_STATUSES),
             BookingRecord.period.overlaps(_to_range(window)),
         )
     )

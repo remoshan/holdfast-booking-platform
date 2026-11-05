@@ -9,7 +9,7 @@ The name is the promise: a reservation hold that holds fast.
 
 ## Guarantees
 
-1. **No double-booking.** No two active bookings overlap on the same resource. From Phase 2 the database enforces this, not just application code.
+1. **No double-booking.** No two active bookings overlap on the same resource. A Postgres exclusion constraint enforces this, so it holds however many requests race for the same slot.
 2. **Tenant isolation.** A user can never read or change another organisation's data. Cross-tenant requests return `404`, so they leak nothing.
 3. **Holds expire.** From Phase 5, a hold that is not paid for in time expires and frees the slot.
 
@@ -21,7 +21,7 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | --- | --- | --- |
 | 0 | Foundations: Compose, CI, migrations, health check | Done |
 | 1 | Core API: CRUD, availability search, problem+json errors | Done |
-| 2 | No double-booking: exclusion constraint, concurrency tests | Planned |
+| 2 | No double-booking: exclusion constraint, concurrency tests | Done |
 | 3 | Authentication and per-organisation roles | Planned |
 | 4 | Data under pressure: indexes, query plans, pagination at depth | Planned |
 | 5 | Background work: expiring holds, job queue, idempotency | Planned |
@@ -109,7 +109,7 @@ A booking must:
 1. start and end on a 15-minute boundary in the location's local time;
 2. fall within the location's opening hours on a single day, so there are no overnight bookings;
 3. start no earlier than now and at most 30 days from today;
-4. not overlap an active booking of the same resource.
+4. not overlap an active booking of the same resource. Postgres enforces this rule itself, so it holds even when many requests arrive at once.
 
 A booking costs the resource's hourly price for the time that actually elapses, rounded half up to a whole minor unit. It can be cancelled until it starts, and cancelling it again changes nothing.
 
@@ -141,6 +141,16 @@ Errors that the HTTP status explains fully, such as `404 Not Found` or a `409 Co
 
 `409`: the resource is already booked for part of the requested period.
 
+## Testing
+
+`make test` runs three suites; `uv run pytest tests/<suite>` runs one of them.
+
+| Suite | What it proves |
+| --- | --- |
+| `tests/unit` | Booking rules, availability and pricing, including daylight-saving changes. Runs in milliseconds without a database. |
+| `tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. |
+| `tests/concurrency` | That exactly one of 50 simultaneous requests for a slot wins, and that 20 inserts released at the same instant end in one booking and clean conflicts, never deadlocks. |
+
 ## Architecture
 
 Holdfast is a modular monolith with strict layers. Each layer may import only the layers below it.
@@ -167,7 +177,8 @@ holdfast-booking-platform/
 ├── migrations/            # Alembic environment and versioned migrations
 ├── tests/
 │   ├── unit/              # domain rules, no database
-│   └── integration/       # through HTTP against a real Postgres
+│   ├── integration/       # through HTTP against a real Postgres
+│   └── concurrency/       # many bookings racing for the same slot
 ├── compose.yaml
 ├── Dockerfile
 └── Makefile
@@ -286,6 +297,24 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 **Decision.** A booking's period is a half-open `[start, end)` `tstzrange` in UTC, so back-to-back bookings do not overlap. Each location has an IANA time zone and weekly opening hours in local wall-clock time, stored as a small JSONB value on the location because they are always read and replaced together. The booking rules are checked in local time, while durations and prices use elapsed UTC time.
 
 **Consequences.** Overlap and availability queries are range operations, ready for an exclusion constraint. A booking that spans a daylight-saving change is charged for the hours that actually pass. Overnight and multi-day bookings are not possible.
+
+</details>
+
+<details>
+<summary><strong>ADR-0007: Postgres prevents double-booking with an exclusion constraint</strong> (Accepted, 2026-11-05)</summary>
+
+**Context.** Phase 1 checked for an overlapping booking and then inserted, so two requests could both pass the check before either committed. Measured with 50 simultaneous requests for one slot, that code confirmed two to four bookings for the same hour in each of five runs.
+
+**Options considered.**
+
+1. *Lock the resource row with `SELECT … FOR UPDATE`, then check and insert.* Correct only while every write path remembers to take the lock first, and it queues every booking of a resource, even bookings that cannot overlap.
+2. *An advisory lock per resource.* The same queueing and the same reliance on discipline, with a lock key the schema knows nothing about.
+3. *`SERIALIZABLE` isolation.* Postgres detects the conflict, but every booking path then needs a retry loop for serialization failures.
+4. *An exclusion constraint.* `EXCLUDE USING gist (resource_id WITH =, period WITH &&)` makes the database reject any overlapping active booking, whichever code path writes it, while bookings that do not overlap proceed in parallel. Its index also serves the availability query.
+
+**Decision.** The exclusion constraint, which needs the `btree_gist` extension. It covers every status except `cancelled`, so a status added later blocks overlaps until it is deliberately freed; forgetting to update the constraint can never allow a double booking. Bookings are written with `INSERT … ON CONFLICT ON CONSTRAINT ex_bookings_no_overlap DO NOTHING`, and an insert that returns no row becomes a `409`. A plain `INSERT` also keeps the guarantee, but colliding inserts wait for each other: in the concurrency suite's racing test it turned 38 to 57 of 190 losing requests into deadlock errors, each after a one-second wait, against none with `ON CONFLICT`.
+
+**Consequences.** No double booking however many API instances run, which the concurrency suite proves on every CI run. Losing requests get a clean `409` at once. A new booking status needs a migration if it should free its slot. Every environment needs `btree_gist`, a trusted extension that managed Postgres services such as Neon provide.
 
 </details>
 
