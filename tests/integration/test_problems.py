@@ -27,7 +27,7 @@ async def test_unknown_route_returns_a_problem(client: AsyncClient) -> None:
 async def test_wrong_method_returns_a_problem_that_lists_the_allowed_methods(
     client: AsyncClient,
 ) -> None:
-    response = await client.delete("/users")
+    response = await client.delete("/auth/login")
 
     assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
     assert response.headers["Content-Type"] == PROBLEM_MEDIA_TYPE
@@ -55,7 +55,12 @@ async def test_openapi_documents_errors_as_problem_details(client: AsyncClient) 
 
 
 async def test_unexpected_errors_hide_their_details() -> None:
-    app = create_app(Settings(database_url="postgresql+asyncpg://unused@localhost/unused"))
+    app = create_app(
+        Settings(
+            database_url="postgresql+asyncpg://unused@localhost/unused",
+            jwt_secret="a-secret-used-only-by-the-test-suite",
+        )
+    )
 
     @app.get("/explode")
     async def explode() -> None:
