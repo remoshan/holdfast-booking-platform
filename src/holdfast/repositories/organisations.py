@@ -14,7 +14,7 @@ from holdfast.repositories.integrity import (
     violation_raises,
 )
 from holdfast.repositories.pagination import fetch_page
-from holdfast.repositories.records import OrganisationRecord
+from holdfast.repositories.records import MembershipRecord, OrganisationRecord
 
 
 async def add(session: AsyncSession, details: OrganisationDetails, currency: str) -> Organisation:
@@ -29,10 +29,28 @@ async def get(session: AsyncSession, organisation_id: UUID) -> Organisation:
     return _to_organisation(await _get_record(session, organisation_id))
 
 
-async def list_page(session: AsyncSession, after: UUID | None, limit: int) -> Page[Organisation]:
-    return await fetch_page(
-        session, select(OrganisationRecord), OrganisationRecord, after, limit, _to_organisation
+async def list_page(
+    session: AsyncSession, member_id: UUID, after: UUID | None, limit: int
+) -> Page[Organisation]:
+    """A page of the organisations the user belongs to."""
+    query = (
+        select(OrganisationRecord)
+        .join(MembershipRecord, MembershipRecord.organisation_id == OrganisationRecord.id)
+        .where(MembershipRecord.user_id == member_id)
     )
+    return await fetch_page(session, query, OrganisationRecord.id, after, limit, _to_organisation)
+
+
+async def lock(session: AsyncSession, organisation_id: UUID) -> None:
+    """Lock the organisation's row until the transaction ends, so that changes to its
+    memberships happen one at a time."""
+    locked_id = await session.scalar(
+        select(OrganisationRecord.id)
+        .where(OrganisationRecord.id == organisation_id)
+        .with_for_update()
+    )
+    if locked_id is None:
+        raise NotFoundError("Organisation", organisation_id)
 
 
 async def update(

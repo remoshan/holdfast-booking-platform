@@ -62,13 +62,14 @@ async def book_resource(
     organisation_id: UUID,
     resource_id: UUID,
     body: BookingRequest,
-    user_id: CurrentUserId,
+    actor_id: CurrentUserId,
     session: DatabaseSession,
     request: Request,
     response: Response,
 ) -> BookingResponse:
+    """Book the resource for the caller."""
     booking = await service.book_resource(
-        session, organisation_id, resource_id, user_id, body.to_period()
+        session, actor_id, organisation_id, resource_id, body.to_period()
     )
     response.headers["Location"] = str(
         request.url_for("get_booking", organisation_id=organisation_id, booking_id=booking.id)
@@ -78,10 +79,15 @@ async def book_resource(
 
 @router.get("/resources/{resource_id}/bookings")
 async def list_bookings(
-    organisation_id: UUID, resource_id: UUID, page_query: PageQuery, session: DatabaseSession
+    organisation_id: UUID,
+    resource_id: UUID,
+    page_query: PageQuery,
+    actor_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> PageResponse[BookingResponse]:
+    """List the resource's bookings: all of them for admins and owners, otherwise your own."""
     page = await service.list_bookings(
-        session, organisation_id, resource_id, page_query.after, page_query.limit
+        session, actor_id, organisation_id, resource_id, page_query.after, page_query.limit
     )
     return PageResponse(
         items=[BookingResponse.from_booking(item) for item in page.items],
@@ -91,16 +97,16 @@ async def list_bookings(
 
 @router.get("/bookings/{booking_id}")
 async def get_booking(
-    organisation_id: UUID, booking_id: UUID, session: DatabaseSession
+    organisation_id: UUID, booking_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> BookingResponse:
-    booking = await service.get_booking(session, organisation_id, booking_id)
+    booking = await service.get_booking(session, actor_id, organisation_id, booking_id)
     return BookingResponse.from_booking(booking)
 
 
 @router.post("/bookings/{booking_id}/cancel")
 async def cancel_booking(
-    organisation_id: UUID, booking_id: UUID, session: DatabaseSession
+    organisation_id: UUID, booking_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> BookingResponse:
     """Cancel a booking that has not started. Cancelling it again returns it unchanged."""
-    booking = await service.cancel_booking(session, organisation_id, booking_id)
+    booking = await service.cancel_booking(session, actor_id, organisation_id, booking_id)
     return BookingResponse.from_booking(booking)

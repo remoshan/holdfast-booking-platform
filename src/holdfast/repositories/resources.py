@@ -40,7 +40,7 @@ async def list_page(
         ResourceRecord.organisation_id == organisation_id,
         ResourceRecord.location_id == location_id,
     )
-    return await fetch_page(session, query, ResourceRecord, after, limit, _to_resource)
+    return await fetch_page(session, query, ResourceRecord.id, after, limit, _to_resource)
 
 
 async def update(

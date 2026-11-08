@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Request, Response, status
 from pydantic import Field, StringConstraints
 
-from holdfast.api.dependencies import DatabaseSession
+from holdfast.api.dependencies import CurrentUserId, DatabaseSession
 from holdfast.api.pagination import PageQuery, PageResponse, next_cursor
 from holdfast.api.schemas import Name, RequestSchema, ResponseSchema
 from holdfast.domain.locations import LocationDetails, OpeningHours, Weekday
@@ -52,11 +52,12 @@ class LocationResponse(ResponseSchema):
 async def create_location(
     organisation_id: UUID,
     body: LocationRequest,
+    actor_id: CurrentUserId,
     session: DatabaseSession,
     request: Request,
     response: Response,
 ) -> LocationResponse:
-    location = await service.create_location(session, organisation_id, body.to_details())
+    location = await service.create_location(session, actor_id, organisation_id, body.to_details())
     response.headers["Location"] = str(
         request.url_for("get_location", organisation_id=organisation_id, location_id=location.id)
     )
@@ -65,10 +66,10 @@ async def create_location(
 
 @router.get("")
 async def list_locations(
-    organisation_id: UUID, page_query: PageQuery, session: DatabaseSession
+    organisation_id: UUID, page_query: PageQuery, actor_id: CurrentUserId, session: DatabaseSession
 ) -> PageResponse[LocationResponse]:
     page = await service.list_locations(
-        session, organisation_id, page_query.after, page_query.limit
+        session, actor_id, organisation_id, page_query.after, page_query.limit
     )
     return PageResponse(
         items=[LocationResponse.model_validate(item) for item in page.items],
@@ -78,24 +79,28 @@ async def list_locations(
 
 @router.get("/{location_id}")
 async def get_location(
-    organisation_id: UUID, location_id: UUID, session: DatabaseSession
+    organisation_id: UUID, location_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> LocationResponse:
-    location = await service.get_location(session, organisation_id, location_id)
+    location = await service.get_location(session, actor_id, organisation_id, location_id)
     return LocationResponse.model_validate(location)
 
 
 @router.put("/{location_id}")
 async def update_location(
-    organisation_id: UUID, location_id: UUID, body: LocationRequest, session: DatabaseSession
+    organisation_id: UUID,
+    location_id: UUID,
+    body: LocationRequest,
+    actor_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> LocationResponse:
     location = await service.update_location(
-        session, organisation_id, location_id, body.to_details()
+        session, actor_id, organisation_id, location_id, body.to_details()
     )
     return LocationResponse.model_validate(location)
 
 
 @router.delete("/{location_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_location(
-    organisation_id: UUID, location_id: UUID, session: DatabaseSession
+    organisation_id: UUID, location_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> None:
-    await service.delete_location(session, organisation_id, location_id)
+    await service.delete_location(session, actor_id, organisation_id, location_id)

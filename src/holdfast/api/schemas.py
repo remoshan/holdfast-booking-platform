@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, StringConstraints
 
 
 class RequestSchema(BaseModel):
@@ -21,3 +21,5 @@ class PeriodResponse(ResponseSchema):
 
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+# Lower-cased, so the same address typed in different case is always the same account.
+Email = Annotated[EmailStr, AfterValidator(str.lower)]

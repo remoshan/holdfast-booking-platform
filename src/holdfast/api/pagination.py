@@ -2,7 +2,7 @@
 
 import base64
 from dataclasses import dataclass
-from typing import Annotated, Protocol
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Query
@@ -13,11 +13,6 @@ from holdfast.domain.pagination import Page
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
-
-
-class _Identified(Protocol):
-    @property
-    def id(self) -> UUID: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,11 +38,11 @@ def _page_request(
 PageQuery = Annotated[PageRequest, Depends(_page_request)]
 
 
-def next_cursor[ItemT: _Identified](page: Page[ItemT]) -> str | None:
+def next_cursor[ItemT](page: Page[ItemT]) -> str | None:
     """Clients treat cursors as opaque, so the server can change how they work at any time."""
-    if not page.has_more:
+    if page.next_after is None:
         return None
-    return base64.urlsafe_b64encode(page.items[-1].id.bytes).rstrip(b"=").decode()
+    return base64.urlsafe_b64encode(page.next_after.bytes).rstrip(b"=").decode()
 
 
 def _decode(cursor: str) -> UUID:

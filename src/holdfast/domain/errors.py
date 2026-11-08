@@ -7,9 +7,17 @@ class DomainError(Exception):
     """A failure caused by the request rather than by a bug."""
 
 
+class AuthenticationError(DomainError):
+    """The caller could not be identified: missing, wrong or expired credentials."""
+
+
+class PermissionDeniedError(DomainError):
+    """The caller belongs to the organisation, but their role does not allow the action."""
+
+
 class NotFoundError(DomainError):
-    def __init__(self, entity: str, entity_id: UUID) -> None:
-        super().__init__(f"{entity} {entity_id} was not found.")
+    def __init__(self, entity: str, key: UUID | str) -> None:
+        super().__init__(f"{entity} {key} was not found.")
 
 
 class ConflictError(DomainError):

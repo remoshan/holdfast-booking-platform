@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Request, Response, status
 from pydantic import Field, StringConstraints
 
-from holdfast.api.dependencies import DatabaseSession
+from holdfast.api.dependencies import CurrentUserId, DatabaseSession
 from holdfast.api.pagination import PageQuery, PageResponse, next_cursor
 from holdfast.api.schemas import Name, RequestSchema, ResponseSchema
 from holdfast.domain.organisations import OrganisationDetails
@@ -45,9 +45,16 @@ class OrganisationResponse(ResponseSchema):
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_organisation(
-    body: NewOrganisationRequest, session: DatabaseSession, request: Request, response: Response
+    body: NewOrganisationRequest,
+    actor_id: CurrentUserId,
+    session: DatabaseSession,
+    request: Request,
+    response: Response,
 ) -> OrganisationResponse:
-    organisation = await service.create_organisation(session, body.to_details(), body.currency)
+    """Create an organisation. Its creator becomes its first owner."""
+    organisation = await service.create_organisation(
+        session, actor_id, body.to_details(), body.currency
+    )
     response.headers["Location"] = str(
         request.url_for("get_organisation", organisation_id=organisation.id)
     )
@@ -56,9 +63,10 @@ async def create_organisation(
 
 @router.get("")
 async def list_organisations(
-    page_query: PageQuery, session: DatabaseSession
+    page_query: PageQuery, actor_id: CurrentUserId, session: DatabaseSession
 ) -> PageResponse[OrganisationResponse]:
-    page = await service.list_organisations(session, page_query.after, page_query.limit)
+    """List the organisations the caller belongs to."""
+    page = await service.list_organisations(session, actor_id, page_query.after, page_query.limit)
     return PageResponse(
         items=[OrganisationResponse.model_validate(item) for item in page.items],
         next_cursor=next_cursor(page),
@@ -66,19 +74,28 @@ async def list_organisations(
 
 
 @router.get("/{organisation_id}")
-async def get_organisation(organisation_id: UUID, session: DatabaseSession) -> OrganisationResponse:
-    organisation = await service.get_organisation(session, organisation_id)
+async def get_organisation(
+    organisation_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
+) -> OrganisationResponse:
+    organisation = await service.get_organisation(session, actor_id, organisation_id)
     return OrganisationResponse.model_validate(organisation)
 
 
 @router.put("/{organisation_id}")
 async def update_organisation(
-    organisation_id: UUID, body: OrganisationRequest, session: DatabaseSession
+    organisation_id: UUID,
+    body: OrganisationRequest,
+    actor_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> OrganisationResponse:
-    organisation = await service.update_organisation(session, organisation_id, body.to_details())
+    organisation = await service.update_organisation(
+        session, actor_id, organisation_id, body.to_details()
+    )
     return OrganisationResponse.model_validate(organisation)
 
 
 @router.delete("/{organisation_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_organisation(organisation_id: UUID, session: DatabaseSession) -> None:
-    await service.delete_organisation(session, organisation_id)
+async def delete_organisation(
+    organisation_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
+) -> None:
+    await service.delete_organisation(session, actor_id, organisation_id)
