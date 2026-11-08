@@ -1,52 +1,50 @@
-from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID
 
+import jwt
 import pytest
-from fastapi import status
+from fastapi import FastAPI, status
 from httpx import AsyncClient
+
+from holdfast.core.security import issue_access_token
 
 pytestmark = pytest.mark.anyio
 
 type Json = dict[str, Any]
-type Factory = Callable[..., Awaitable[Json]]
 
 
-async def test_create_user_lowercases_the_email(client: AsyncClient) -> None:
-    response = await client.post("/users", json={"email": "Ada@Example.com"})
-
-    assert response.status_code == status.HTTP_201_CREATED
-    user = response.json()
-    assert user["email"] == "ada@example.com"
-    assert response.headers["Location"] == f"http://test/users/{user['id']}"
-
-
-async def test_create_user_rejects_an_email_already_in_use(
-    client: AsyncClient, create_user: Factory
-) -> None:
-    await create_user(email="ada@example.com")
-
-    response = await client.post("/users", json={"email": "ADA@example.com"})
-
-    assert response.status_code == status.HTTP_409_CONFLICT
-    assert response.json()["detail"] == "The email ada@example.com is already in use."
-
-
-async def test_create_user_rejects_an_invalid_email(client: AsyncClient) -> None:
-    response = await client.post("/users", json={"email": "not-an-email"})
-
-    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert response.json()["errors"][0]["pointer"] == "#/email"
-
-
-async def test_get_user(client: AsyncClient, user: Json) -> None:
-    response = await client.get(f"/users/{user['id']}")
+async def test_get_current_user(client: AsyncClient, user: Json) -> None:
+    response = await client.get("/users/me")
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.json() == user
+    assert response.json() == {key: user[key] for key in ("id", "email", "created_at")}
 
 
-async def test_get_unknown_user_returns_404(client: AsyncClient) -> None:
-    response = await client.get(f"/users/{uuid4()}")
+async def test_requests_without_a_token_are_unauthorised(anonymous_client: AsyncClient) -> None:
+    response = await anonymous_client.get("/users/me")
 
-    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def _forged_token(kind: str, user_id: UUID, secret: str) -> str:
+    now = datetime.now(UTC)
+    if kind == "expired":
+        return issue_access_token(user_id, secret, now - timedelta(hours=1))
+    if kind == "signed with another key":
+        return issue_access_token(user_id, "another-key-that-is-32-characters", now)
+    claims = {"sub": str(user_id), "iat": now, "exp": now + timedelta(hours=1)}
+    return jwt.encode(claims, key="", algorithm="none")
+
+
+@pytest.mark.parametrize("kind", ["expired", "signed with another key", "unsigned"])
+async def test_invalid_access_tokens_are_rejected(
+    app: FastAPI, anonymous_client: AsyncClient, user: Json, kind: str
+) -> None:
+    token = _forged_token(kind, UUID(user["id"]), app.state.settings.jwt_secret.get_secret_value())
+
+    response = await anonymous_client.get("/users/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert response.json()["detail"] == "The access token is invalid or has expired."

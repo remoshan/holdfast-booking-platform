@@ -12,11 +12,13 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
 from holdfast.domain.errors import (
+    AuthenticationError,
     BookingConflictError,
     ConflictError,
     DomainError,
     InvalidBookingError,
     NotFoundError,
+    PermissionDeniedError,
 )
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
@@ -37,6 +39,8 @@ BOOKING_CONFLICT = ProblemType(f"{_DOCUMENTATION_URL}booking-conflict", "Resourc
 
 # None means "about:blank": the HTTP status alone describes the problem.
 _DOMAIN_PROBLEMS: Mapping[type[DomainError], tuple[int, ProblemType | None]] = {
+    AuthenticationError: (status.HTTP_401_UNAUTHORIZED, None),
+    PermissionDeniedError: (status.HTTP_403_FORBIDDEN, None),
     NotFoundError: (status.HTTP_404_NOT_FOUND, None),
     ConflictError: (status.HTTP_409_CONFLICT, None),
     BookingConflictError: (status.HTTP_409_CONFLICT, BOOKING_CONFLICT),
@@ -106,8 +110,11 @@ async def _validation_problem(request: Request, error: RequestValidationError) -
 
 
 def _domain_problem(status_code: int, problem_type: ProblemType | None) -> ProblemHandler:
+    # RFC 9110 requires every 401 to name the authentication scheme the client should use.
+    headers = {"WWW-Authenticate": "Bearer"} if status_code == 401 else None
+
     async def handle(request: Request, error: DomainError) -> Response:
-        return _problem_response(request, status_code, str(error), problem_type)
+        return _problem_response(request, status_code, str(error), problem_type, headers=headers)
 
     return handle
 

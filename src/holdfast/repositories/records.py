@@ -16,9 +16,10 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, Range
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from holdfast.domain.bookings import BookingStatus
+from holdfast.domain.memberships import Role
 from holdfast.domain.resources import ResourceKind
 
 # Deterministic constraint names, so migrations can reference and drop them reliably.
@@ -62,6 +63,18 @@ class UserRecord(EntityRecord):
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(unique=True)
+    password_hash: Mapped[str]
+
+
+class RefreshTokenRecord(EntityRecord):
+    __tablename__ = "refresh_tokens"
+
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    family_id: Mapped[UUID]
+    token_hash: Mapped[str] = mapped_column(unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class OrganisationRecord(EntityRecord):
@@ -70,6 +83,19 @@ class OrganisationRecord(EntityRecord):
     name: Mapped[str]
     slug: Mapped[str] = mapped_column(unique=True)
     currency: Mapped[str] = mapped_column(String(3))
+
+
+class MembershipRecord(Base):
+    __tablename__ = "memberships"
+
+    organisation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    role: Mapped[Role] = mapped_column(_string_enum(Role, "membership_role"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Joined into every query, so a membership always arrives with its member's email.
+    user: Mapped[UserRecord] = relationship(lazy="joined", innerjoin=True)
 
 
 class LocationRecord(EntityRecord):

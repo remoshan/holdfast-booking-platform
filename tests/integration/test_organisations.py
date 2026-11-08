@@ -27,6 +27,30 @@ async def test_create_organisation(client: AsyncClient) -> None:
     assert response.headers["Location"] == f"http://test/organisations/{organisation['id']}"
 
 
+async def test_the_creator_becomes_the_owner(
+    client: AsyncClient, organisation: Json, user: Json
+) -> None:
+    response = await client.get(f"/organisations/{organisation['id']}/members")
+
+    members = response.json()["items"]
+    assert [(member["user_id"], member["role"]) for member in members] == [(user["id"], "owner")]
+
+
+async def test_list_organisations_shows_only_the_callers_own(
+    client: AsyncClient, organisation: Json, create_user: Factory
+) -> None:
+    stranger = await create_user(email="grace@example.com")
+    await client.post(
+        "/organisations",
+        json={"name": "Other Spaces", "slug": "other-spaces", "currency": "GBP"},
+        headers=stranger["headers"],
+    )
+
+    response = await client.get("/organisations")
+
+    assert [item["id"] for item in response.json()["items"]] == [organisation["id"]]
+
+
 async def test_create_organisation_rejects_a_taken_slug(
     client: AsyncClient, organisation: Json
 ) -> None:

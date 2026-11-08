@@ -59,13 +59,21 @@ async def get(session: AsyncSession, organisation_id: UUID, booking_id: UUID) ->
 
 
 async def list_page(
-    session: AsyncSession, organisation_id: UUID, resource_id: UUID, after: UUID | None, limit: int
+    session: AsyncSession,
+    organisation_id: UUID,
+    resource_id: UUID,
+    booked_by: UUID | None,
+    after: UUID | None,
+    limit: int,
 ) -> Page[Booking]:
+    """A page of the resource's bookings, only those of `booked_by` unless it is None."""
     query = select(BookingRecord).where(
         BookingRecord.organisation_id == organisation_id,
         BookingRecord.resource_id == resource_id,
     )
-    return await fetch_page(session, query, BookingRecord, after, limit, _to_booking)
+    if booked_by is not None:
+        query = query.where(BookingRecord.user_id == booked_by)
+    return await fetch_page(session, query, BookingRecord.id, after, limit, _to_booking)
 
 
 async def active_periods(session: AsyncSession, resource_id: UUID, window: Period) -> list[Period]:

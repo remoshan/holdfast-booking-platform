@@ -1,4 +1,4 @@
-"""Use cases for resources and their availability."""
+"""Use cases for resources and their availability. Members may read; admins and owners manage."""
 
 from datetime import UTC, date, datetime
 from uuid import UUID
@@ -6,48 +6,73 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from holdfast.domain.availability import Availability, bookable_periods
+from holdfast.domain.memberships import Role
 from holdfast.domain.pagination import Page
 from holdfast.domain.resources import Resource, ResourceDetails
 from holdfast.repositories import bookings, locations, resources
+from holdfast.services.permissions import require_membership
 
 
 async def create_resource(
-    session: AsyncSession, organisation_id: UUID, location_id: UUID, details: ResourceDetails
+    session: AsyncSession,
+    actor_id: UUID,
+    organisation_id: UUID,
+    location_id: UUID,
+    details: ResourceDetails,
 ) -> Resource:
     async with session.begin():
+        await require_membership(session, organisation_id, actor_id, Role.ADMIN)
         await locations.get(session, organisation_id, location_id)
         return await resources.add(session, organisation_id, location_id, details)
 
 
 async def list_resources(
-    session: AsyncSession, organisation_id: UUID, location_id: UUID, after: UUID | None, limit: int
+    session: AsyncSession,
+    actor_id: UUID,
+    organisation_id: UUID,
+    location_id: UUID,
+    after: UUID | None,
+    limit: int,
 ) -> Page[Resource]:
     async with session.begin():
+        await require_membership(session, organisation_id, actor_id)
         await locations.get(session, organisation_id, location_id)
         return await resources.list_page(session, organisation_id, location_id, after, limit)
 
 
-async def get_resource(session: AsyncSession, organisation_id: UUID, resource_id: UUID) -> Resource:
+async def get_resource(
+    session: AsyncSession, actor_id: UUID, organisation_id: UUID, resource_id: UUID
+) -> Resource:
     async with session.begin():
+        await require_membership(session, organisation_id, actor_id)
         return await resources.get(session, organisation_id, resource_id)
 
 
 async def update_resource(
-    session: AsyncSession, organisation_id: UUID, resource_id: UUID, details: ResourceDetails
+    session: AsyncSession,
+    actor_id: UUID,
+    organisation_id: UUID,
+    resource_id: UUID,
+    details: ResourceDetails,
 ) -> Resource:
     async with session.begin():
+        await require_membership(session, organisation_id, actor_id, Role.ADMIN)
         return await resources.update(session, organisation_id, resource_id, details)
 
 
-async def delete_resource(session: AsyncSession, organisation_id: UUID, resource_id: UUID) -> None:
+async def delete_resource(
+    session: AsyncSession, actor_id: UUID, organisation_id: UUID, resource_id: UUID
+) -> None:
     async with session.begin():
+        await require_membership(session, organisation_id, actor_id, Role.ADMIN)
         await resources.remove(session, organisation_id, resource_id)
 
 
 async def get_availability(
-    session: AsyncSession, organisation_id: UUID, resource_id: UUID, day: date
+    session: AsyncSession, actor_id: UUID, organisation_id: UUID, resource_id: UUID, day: date
 ) -> Availability:
     async with session.begin():
+        await require_membership(session, organisation_id, actor_id)
         resource = await resources.get(session, organisation_id, resource_id)
         location = await locations.get(session, organisation_id, resource.location_id)
         opening_period = location.opening_period(day)

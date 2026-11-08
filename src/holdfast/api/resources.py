@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import Field
 
-from holdfast.api.dependencies import DatabaseSession
+from holdfast.api.dependencies import CurrentUserId, DatabaseSession
 from holdfast.api.pagination import PageQuery, PageResponse, next_cursor
 from holdfast.api.schemas import Name, PeriodResponse, RequestSchema, ResponseSchema
 from holdfast.domain.resources import ResourceDetails, ResourceKind
@@ -55,12 +55,13 @@ async def create_resource(
     organisation_id: UUID,
     location_id: UUID,
     body: ResourceRequest,
+    actor_id: CurrentUserId,
     session: DatabaseSession,
     request: Request,
     response: Response,
 ) -> ResourceResponse:
     resource = await service.create_resource(
-        session, organisation_id, location_id, body.to_details()
+        session, actor_id, organisation_id, location_id, body.to_details()
     )
     response.headers["Location"] = str(
         request.url_for("get_resource", organisation_id=organisation_id, resource_id=resource.id)
@@ -70,10 +71,14 @@ async def create_resource(
 
 @router.get("/locations/{location_id}/resources")
 async def list_resources(
-    organisation_id: UUID, location_id: UUID, page_query: PageQuery, session: DatabaseSession
+    organisation_id: UUID,
+    location_id: UUID,
+    page_query: PageQuery,
+    actor_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> PageResponse[ResourceResponse]:
     page = await service.list_resources(
-        session, organisation_id, location_id, page_query.after, page_query.limit
+        session, actor_id, organisation_id, location_id, page_query.after, page_query.limit
     )
     return PageResponse(
         items=[ResourceResponse.model_validate(item) for item in page.items],
@@ -83,27 +88,31 @@ async def list_resources(
 
 @router.get("/resources/{resource_id}")
 async def get_resource(
-    organisation_id: UUID, resource_id: UUID, session: DatabaseSession
+    organisation_id: UUID, resource_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> ResourceResponse:
-    resource = await service.get_resource(session, organisation_id, resource_id)
+    resource = await service.get_resource(session, actor_id, organisation_id, resource_id)
     return ResourceResponse.model_validate(resource)
 
 
 @router.put("/resources/{resource_id}")
 async def update_resource(
-    organisation_id: UUID, resource_id: UUID, body: ResourceRequest, session: DatabaseSession
+    organisation_id: UUID,
+    resource_id: UUID,
+    body: ResourceRequest,
+    actor_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> ResourceResponse:
     resource = await service.update_resource(
-        session, organisation_id, resource_id, body.to_details()
+        session, actor_id, organisation_id, resource_id, body.to_details()
     )
     return ResourceResponse.model_validate(resource)
 
 
 @router.delete("/resources/{resource_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_resource(
-    organisation_id: UUID, resource_id: UUID, session: DatabaseSession
+    organisation_id: UUID, resource_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> None:
-    await service.delete_resource(session, organisation_id, resource_id)
+    await service.delete_resource(session, actor_id, organisation_id, resource_id)
 
 
 @router.get("/resources/{resource_id}/availability")
@@ -111,7 +120,10 @@ async def get_availability(
     organisation_id: UUID,
     resource_id: UUID,
     day: Annotated[date, Query(alias="date", description="A day in the location's time zone.")],
+    actor_id: CurrentUserId,
     session: DatabaseSession,
 ) -> AvailabilityResponse:
-    availability = await service.get_availability(session, organisation_id, resource_id, day)
+    availability = await service.get_availability(
+        session, actor_id, organisation_id, resource_id, day
+    )
     return AvailabilityResponse.model_validate(availability)

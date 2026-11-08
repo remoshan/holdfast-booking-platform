@@ -79,55 +79,25 @@ async def test_booking_must_end_after_it_starts(book: Book) -> None:
 
 
 async def test_booking_times_need_a_utc_offset(
-    client: AsyncClient, organisation: Json, resource: Json, user: Json
+    client: AsyncClient, organisation: Json, resource: Json
 ) -> None:
     response = await client.post(
         f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings",
         json={"start": "2026-11-09T09:00:00", "end": "2026-11-09T10:00:00Z"},
-        headers={"X-User-ID": user["id"]},
     )
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert [error["pointer"] for error in response.json()["errors"]] == ["#/start"]
 
 
-async def test_booking_requires_the_user_header(
-    client: AsyncClient, organisation: Json, resource: Json, at: Callable[..., str]
-) -> None:
-    response = await client.post(
-        f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings",
-        json={"start": at("09:00"), "end": at("10:00")},
-    )
-
-    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert response.json()["errors"] == [{"detail": "Field required", "header": "X-User-ID"}]
-
-
-async def test_booking_by_unknown_user_returns_404(
-    client: AsyncClient, organisation: Json, resource: Json, at: Callable[..., str]
-) -> None:
-    response = await client.post(
-        f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings",
-        json={"start": at("09:00"), "end": at("10:00")},
-        headers={"X-User-ID": str(uuid4())},
-    )
-
-    assert response.status_code == status.HTTP_404_NOT_FOUND
-
-
 async def test_booking_another_organisations_resource_returns_404(
-    client: AsyncClient,
-    resource: Json,
-    user: Json,
-    at: Callable[..., str],
-    create_organisation: Factory,
+    client: AsyncClient, resource: Json, at: Callable[..., str], create_organisation: Factory
 ) -> None:
     other = await create_organisation(slug="other")
 
     response = await client.post(
         f"/organisations/{other['id']}/resources/{resource['id']}/bookings",
         json={"start": at("09:00"), "end": at("10:00")},
-        headers={"X-User-ID": user["id"]},
     )
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
@@ -206,3 +176,46 @@ async def test_cancel_unknown_booking_returns_404(client: AsyncClient, organisat
     response = await client.post(f"/organisations/{organisation['id']}/bookings/{uuid4()}/cancel")
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+async def test_members_list_only_their_own_bookings(
+    client: AsyncClient, organisation: Json, resource: Json, book: Book, add_member: Factory
+) -> None:
+    member = await add_member(organisation["id"], "member")
+    owners_booking = (await book("09:00", "10:00")).json()
+    members_booking = (await book("11:00", "12:00", headers=member["headers"])).json()
+    path = f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings"
+
+    as_member = await client.get(path, headers=member["headers"])
+    as_owner = await client.get(path)
+
+    assert as_member.json()["items"] == [members_booking]
+    assert as_owner.json()["items"] == [owners_booking, members_booking]
+
+
+async def test_members_cannot_see_or_cancel_other_peoples_bookings(
+    client: AsyncClient, organisation: Json, book: Book, add_member: Factory
+) -> None:
+    member = await add_member(organisation["id"], "member")
+    booking = (await book("09:00", "10:00")).json()
+    path = f"/organisations/{organisation['id']}/bookings/{booking['id']}"
+
+    seen = await client.get(path, headers=member["headers"])
+    cancelled = await client.post(f"{path}/cancel", headers=member["headers"])
+
+    assert (seen.status_code, cancelled.status_code) == (404, 404)
+
+
+async def test_members_can_cancel_their_own_bookings(
+    client: AsyncClient, organisation: Json, book: Book, add_member: Factory
+) -> None:
+    member = await add_member(organisation["id"], "member")
+    booking = (await book("09:00", "10:00", headers=member["headers"])).json()
+
+    response = await client.post(
+        f"/organisations/{organisation['id']}/bookings/{booking['id']}/cancel",
+        headers=member["headers"],
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == "cancelled"

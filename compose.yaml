@@ -5,6 +5,8 @@ x-holdfast-app: &holdfast-app
   image: holdfast:local
   environment:
     DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@database:5432/holdfast
+    # Local development only. Every deployed environment sets its own random secret.
+    JWT_SECRET: local-development-secret-never-used-anywhere-else
 
 services:
   database:

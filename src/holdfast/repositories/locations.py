@@ -37,7 +37,7 @@ async def list_page(
     session: AsyncSession, organisation_id: UUID, after: UUID | None, limit: int
 ) -> Page[Location]:
     query = select(LocationRecord).where(LocationRecord.organisation_id == organisation_id)
-    return await fetch_page(session, query, LocationRecord, after, limit, _to_location)
+    return await fetch_page(session, query, LocationRecord.id, after, limit, _to_location)
 
 
 async def update(

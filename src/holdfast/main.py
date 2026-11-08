@@ -7,7 +7,16 @@ from importlib import metadata
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from holdfast.api import bookings, health, locations, organisations, resources, users
+from holdfast.api import (
+    auth,
+    bookings,
+    health,
+    locations,
+    memberships,
+    organisations,
+    resources,
+    users,
+)
 from holdfast.api.errors import PROBLEM_HANDLERS, PROBLEM_RESPONSES
 from holdfast.core.config import Settings
 
@@ -31,10 +40,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exception_handlers=PROBLEM_HANDLERS,
         responses=PROBLEM_RESPONSES,
     )
+    app.state.settings = settings
     for router in (
         health.router,
+        auth.router,
         users.router,
         organisations.router,
+        memberships.router,
         locations.router,
         resources.router,
         bookings.router,

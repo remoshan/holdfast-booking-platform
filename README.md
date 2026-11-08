@@ -10,7 +10,7 @@ The name is the promise: a reservation hold that holds fast.
 ## Guarantees
 
 1. **No double-booking.** No two active bookings overlap on the same resource. A Postgres exclusion constraint enforces this, so it holds however many requests race for the same slot.
-2. **Tenant isolation.** A user can never read or change another organisation's data. Cross-tenant requests return `404`, so they leak nothing.
+2. **Tenant isolation.** A user can never read or change another organisation's data. Every request carries a signed access token, every query is scoped to one organisation, and requests from outside it return `404`, so they leak nothing.
 3. **Holds expire.** From Phase 5, a hold that is not paid for in time expires and frees the slot.
 
 ## Roadmap
@@ -22,7 +22,7 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | 0 | Foundations: Compose, CI, migrations, health check | Done |
 | 1 | Core API: CRUD, availability search, problem+json errors | Done |
 | 2 | No double-booking: exclusion constraint, concurrency tests | Done |
-| 3 | Authentication and per-organisation roles | Planned |
+| 3 | Authentication and per-organisation roles | Done |
 | 4 | Data under pressure: indexes, query plans, pagination at depth | Planned |
 | 5 | Background work: expiring holds, job queue, idempotency | Planned |
 | 6 | Payment saga, outbox, two extracted services | Planned |
@@ -36,6 +36,7 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | Database | PostgreSQL 18 |
 | Data access and migrations | SQLAlchemy 2.1 (async, asyncpg), Alembic |
 | Settings and validation | Pydantic v2, pydantic-settings |
+| Authentication | JWT access tokens (PyJWT), Argon2id password hashing (argon2-cffi) |
 | Testing | pytest, HTTPX, Testcontainers (real Postgres, never SQLite) |
 | Quality gates | Ruff, mypy (strict), import-linter, pre-commit |
 | Packaging | uv |
@@ -53,7 +54,7 @@ make install   # create the virtualenv and install the pre-commit hooks
 make up        # build and start Postgres, run migrations, start the API
 ```
 
-The API is then available at <http://localhost:8000>, with interactive OpenAPI docs at <http://localhost:8000/docs>. Stop everything with `make down`.
+The API is then available at <http://localhost:8000>, with interactive OpenAPI docs at <http://localhost:8000/docs>. To try it there, register with `POST /auth/register`, log in with `POST /auth/login`, then choose **Authorize** and paste the `access_token`. Stop everything with `make down`.
 
 ### Commands
 
@@ -73,18 +74,24 @@ The API is then available at <http://localhost:8000>, with interactive OpenAPI d
 | Variable | Description |
 | --- | --- |
 | `DATABASE_URL` | SQLAlchemy URL with the asyncpg driver, e.g. `postgresql+asyncpg://user:password@host:5432/holdfast` |
+| `JWT_SECRET` | Key that signs access tokens: at least 32 random characters, different in every environment. Compose sets a value for local development only. |
 
 ## API
 
-Every path that belongs to a tenant starts with `/organisations/{organisation_id}`, shortened to `…` below. The running API documents every request and response at `/docs`.
+Every path that belongs to a tenant starts with `/organisations/{organisation_id}`, shortened to `…` below. Every endpoint except `/health` and `/auth/*` needs an access token. The running API documents every request and response at `/docs`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Report whether the API can reach its database |
-| `POST` | `/users` | Create a user |
-| `GET` | `/users/{user_id}` | Get a user |
-| `POST`, `GET` | `/organisations` | Create or list organisations |
+| `POST` | `/auth/register` | Create an account |
+| `POST` | `/auth/login` | Exchange an email and password for tokens |
+| `POST` | `/auth/refresh` | Exchange a refresh token for new tokens |
+| `POST` | `/auth/logout` | End the sign-in a refresh token belongs to |
+| `GET` | `/users/me` | Get the signed-in user |
+| `POST`, `GET` | `/organisations` | Create an organisation, or list your own |
 | `GET`, `PUT`, `DELETE` | `/organisations/{organisation_id}` | Get, replace or delete an organisation |
+| `POST`, `GET` | `…/members` | Add a member or list members |
+| `GET`, `PUT`, `DELETE` | `…/members/{user_id}` | Get a member, change their role or remove them |
 | `POST`, `GET` | `…/locations` | Create or list locations |
 | `GET`, `PUT`, `DELETE` | `…/locations/{location_id}` | Get, replace or delete a location |
 | `POST`, `GET` | `…/locations/{location_id}/resources` | Create or list a location's resources |
@@ -96,11 +103,27 @@ Every path that belongs to a tenant starts with `/organisations/{organisation_id
 
 ### Conventions
 
-- **Identity.** Booking needs an `X-User-ID` header naming an existing user. It stands in for authentication until Phase 3, so the API must not be exposed publicly before then.
+- **Authentication.** Logging in returns an access token that lasts 15 minutes and a refresh token. Send the access token as `Authorization: Bearer <token>`. A refresh token works once: `POST /auth/refresh` returns a new pair, and sending a used refresh token again ends that whole sign-in.
 - **Updates.** `PUT` replaces every editable field. Deleting an organisation, location or resource that still has locations, resources or bookings is refused with `409`.
 - **Time.** Request timestamps must include a UTC offset, and responses are in UTC. Opening hours and booking rules use the location's time zone.
 - **Money.** Prices are integers in minor units, such as cents, of the organisation's currency. The currency is set when the organisation is created and never changes.
 - **Pagination.** Lists return `{"items": [...], "next_cursor": "..."}`. Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last page. `limit` is 1 to 100 and defaults to 20.
+
+### Roles
+
+Each member of an organisation has one role, and each role may do everything the roles to its left may.
+
+| | Member | Admin | Owner |
+| --- | :-: | :-: | :-: |
+| See the organisation, its locations, resources and availability | ✓ | ✓ | ✓ |
+| Book, and see or cancel their own bookings | ✓ | ✓ | ✓ |
+| See and cancel everyone's bookings | | ✓ | ✓ |
+| Manage locations and resources | | ✓ | ✓ |
+| See the member list, and add or remove plain members | | ✓ | ✓ |
+| Change roles, and add or remove admins and owners | | | ✓ |
+| Rename or delete the organisation | | | ✓ |
+
+Whoever creates an organisation becomes its owner, and an organisation always keeps at least one owner. Anyone outside the organisation gets `404` for everything in it. A member whose role is too low gets `403`, except that other people's bookings simply look missing (`404`) to a plain member.
 
 ### Booking rules
 
@@ -127,7 +150,7 @@ Every error is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem det
 }
 ```
 
-Errors that the HTTP status explains fully, such as `404 Not Found` or a `409 Conflict` for a taken slug, use the type `about:blank`. These problem types carry more meaning:
+Errors that the HTTP status explains fully, such as `401 Unauthorized`, `403 Forbidden`, `404 Not Found` or a `409 Conflict` for a taken slug, use the type `about:blank`; every `401` also carries `WWW-Authenticate: Bearer`. These problem types carry more meaning:
 
 #### validation-error
 
@@ -147,8 +170,8 @@ Errors that the HTTP status explains fully, such as `404 Not Found` or a `409 Co
 
 | Suite | What it proves |
 | --- | --- |
-| `tests/unit` | Booking rules, availability and pricing, including daylight-saving changes. Runs in milliseconds without a database. |
-| `tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. |
+| `tests/unit` | Booking rules, availability, pricing, roles and tokens, including daylight-saving changes. Runs in milliseconds without a database. |
+| `tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. A permission matrix calls every organisation endpoint as an anonymous caller, an outsider, a member, an admin and an owner, and fails if a new endpoint is missing from it. |
 | `tests/concurrency` | That exactly one of 50 simultaneous requests for a slot wins, and that 20 inserts released at the same instant end in one booking and clean conflicts, never deadlocks. |
 
 ## Architecture
@@ -163,7 +186,7 @@ flowchart TD
     repositories --> domain
 ```
 
-import-linter enforces the layers in CI: routers never import repositories, and the domain imports no framework. `core` holds cross-cutting infrastructure (configuration).
+import-linter enforces the layers in CI: routers never import repositories, and the domain imports no framework. `core` holds cross-cutting infrastructure: configuration, password hashing and tokens.
 
 ```text
 holdfast-booking-platform/
@@ -173,7 +196,7 @@ holdfast-booking-platform/
 │   ├── services/          # use cases, one transaction each
 │   ├── domain/            # entities and booking rules, free of frameworks
 │   ├── repositories/      # table mappings and all SQL
-│   └── core/              # settings
+│   └── core/              # settings, password hashing and tokens
 ├── migrations/            # Alembic environment and versioned migrations
 ├── tests/
 │   ├── unit/              # domain rules, no database
@@ -315,6 +338,40 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 **Decision.** The exclusion constraint, which needs the `btree_gist` extension. It covers every status except `cancelled`, so a status added later blocks overlaps until it is deliberately freed; forgetting to update the constraint can never allow a double booking. Bookings are written with `INSERT … ON CONFLICT ON CONSTRAINT ex_bookings_no_overlap DO NOTHING`, and an insert that returns no row becomes a `409`. A plain `INSERT` also keeps the guarantee, but colliding inserts wait for each other: in the concurrency suite's racing test it turned 38 to 57 of 190 losing requests into deadlock errors, each after a one-second wait, against none with `ON CONFLICT`.
 
 **Consequences.** No double booking however many API instances run, which the concurrency suite proves on every CI run. Losing requests get a clean `409` at once. A new booking status needs a migration if it should free its slot. Every environment needs `btree_gist`, a trusted extension that managed Postgres services such as Neon provide.
+
+</details>
+
+<details>
+<summary><strong>ADR-0008: Short-lived JWT access tokens with rotating refresh tokens</strong> (Accepted, 2026-11-08)</summary>
+
+**Context.** Every request must prove who sent it, replacing the temporary `X-User-ID` header of ADR-0005. The API will run as several instances, its clients are the OpenAPI page today and a web app later, and a stolen credential must be possible to cut off.
+
+**Options considered.**
+
+1. *Server-side sessions.* An opaque token looked up on every request. Revocation is instant, but every call costs a database query.
+2. *Long-lived JWTs.* No lookups at all, but a stolen token keeps working until it expires and cannot be revoked.
+3. *Short-lived JWT access tokens plus rotating refresh tokens.* Access tokens are verified with the signing key alone. Refresh tokens are opaque, stored only as hashes, and replaced on every use; sending a used one again revokes every token from that sign-in.
+
+**Decision.** Option 3. Access tokens last 15 minutes and are signed with HS256, the only algorithm the API accepts, so a forged `alg: none` token is refused. Refresh tokens last 30 days, and each sign-in's chain of them shares a family id so that a replay revokes all of them. Passwords are hashed with Argon2id in a worker thread, an unknown email takes as long to reject as a wrong password, and old hashes are upgraded at login when the hashing settings get stronger. Responses that carry tokens are marked `Cache-Control: no-store`.
+
+**Consequences.** Authenticating a request needs no database lookup. Logging out or detecting a replay ends the refresh tokens at once, but an access token already issued stays valid for up to 15 minutes. Two clients that refresh with the same token at the same moment are treated as a replay and signed out, a deliberate trade for simplicity. Only the API holds the HS256 key, so if extracted services ever need to verify user tokens, the keys must become asymmetric. Expired refresh tokens pile up until a Phase 5 job removes them.
+
+</details>
+
+<details>
+<summary><strong>ADR-0009: Roles belong to memberships, and services enforce them</strong> (Accepted, 2026-11-08)</summary>
+
+**Context.** One user can belong to several organisations with a different role in each. Permission checks must live in the service layer, not only in routers, and tenant isolation must leak nothing to outsiders.
+
+**Options considered.**
+
+1. *One global role per user.* Simple, but it cannot express "admin here, member there".
+2. *Checks in the routers, as FastAPI dependencies.* Visible in each route's signature, but background workers and any future entry point would bypass them.
+3. *A role per membership, checked at the start of every service function.* Every entry point passes the same check.
+
+**Decision.** Option 3. Every organisation-scoped use case starts with `require_membership`, which reports outsiders as `404`, exactly like an organisation that does not exist, and members below the required role as `403`. The rules about who may manage whom and who sees every booking live in the domain's `Membership`. Any change to memberships first locks the organisation's row, so two owners who step down at the same moment cannot leave it without an owner.
+
+**Consequences.** A permission matrix calls every organisation endpoint as five kinds of caller, and a test fails when a new endpoint is missing from it. Every service function takes the caller's id. Outsiders cannot tell an organisation that exists from one that does not.
 
 </details>
 
