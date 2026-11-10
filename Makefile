@@ -1,5 +1,5 @@
 # Recipes are single commands so they run the same under sh (CI, Git Bash) and cmd.exe.
-.PHONY: install up down migrate format lint typecheck test check
+.PHONY: install up down migrate seed explain format lint typecheck test check
 
 install:
 	uv sync
@@ -13,6 +13,12 @@ down:
 
 migrate:
 	docker compose run --build --rm migrate
+
+seed:
+	uv run python scripts/seed.py
+
+explain:
+	uv run python scripts/explain.py
 
 format:
 	uv run ruff format

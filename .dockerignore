@@ -1,6 +1,7 @@
 .git
 .github
 .venv
+scripts
 tests
 **/__pycache__
 .import_linter_cache
