@@ -10,7 +10,7 @@ The name is the promise: a reservation hold that holds fast.
 ## Guarantees
 
 1. **No double-booking.** No two active bookings overlap on the same resource. A Postgres exclusion constraint enforces this, so it holds however many requests race for the same slot.
-2. **Tenant isolation.** A user can never read or change another organisation's data. Every request carries a signed access token, every query is scoped to one organisation, and requests from outside it return `404`, so they leak nothing.
+2. **Tenant isolation.** A user can never read or change another organisation's data. Every request carries a signed access token, every query on tenant data is scoped to an organisation the caller belongs to, and requests from outside it return `404`, so they leak nothing.
 3. **Holds expire.** From Phase 5, a hold that is not paid for in time expires and frees the slot.
 
 ## Roadmap
@@ -23,7 +23,7 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | 1 | Core API: CRUD, availability search, problem+json errors | Done |
 | 2 | No double-booking: exclusion constraint, concurrency tests | Done |
 | 3 | Authentication and per-organisation roles | Done |
-| 4 | Data under pressure: indexes, query plans, pagination at depth | Planned |
+| 4 | Data under pressure: indexes, query plans, pagination at depth | Done |
 | 5 | Background work: expiring holds, job queue, idempotency | Planned |
 | 6 | Payment saga, outbox, two extracted services | Planned |
 | 7 | Hardening: OWASP review, rate limits, tracing | Planned |
@@ -56,6 +56,8 @@ make up        # build and start Postgres, run migrations, start the API
 
 The API is then available at <http://localhost:8000>, with interactive OpenAPI docs at <http://localhost:8000/docs>. To try it there, register with `POST /auth/register`, log in with `POST /auth/login`, then choose **Authorize** and paste the `access_token`. Stop everything with `make down`.
 
+Postgres listens on `127.0.0.1:54320` for local tools, with `holdfast` as user, password and database. The uncommon port avoids any other Postgres on your machine, and the server is not reachable from the network.
+
 ### Commands
 
 | Command | What it does |
@@ -63,6 +65,8 @@ The API is then available at <http://localhost:8000>, with interactive OpenAPI d
 | `make install` | Install dependencies and the pre-commit hooks |
 | `make up` / `make down` | Start or stop the full stack in Docker |
 | `make migrate` | Apply new migrations to the running database |
+| `make seed` | Fill the empty local database with a million bookings, in about three minutes |
+| `make explain` | Measure the hot queries with `EXPLAIN ANALYZE`, before and after the Phase 4 indexes |
 | `make format` | Format code and apply safe lint fixes |
 | `make lint` | Ruff lint and format check, plus the layer import rules |
 | `make typecheck` | mypy in strict mode |
@@ -88,6 +92,7 @@ Every path that belongs to a tenant starts with `/organisations/{organisation_id
 | `POST` | `/auth/refresh` | Exchange a refresh token for new tokens |
 | `POST` | `/auth/logout` | End the sign-in a refresh token belongs to |
 | `GET` | `/users/me` | Get the signed-in user |
+| `GET` | `/users/me/bookings` | List your bookings that have not ended, soonest first, in every organisation you belong to |
 | `POST`, `GET` | `/organisations` | Create an organisation, or list your own |
 | `GET`, `PUT`, `DELETE` | `/organisations/{organisation_id}` | Get, replace or delete an organisation |
 | `POST`, `GET` | `…/members` | Add a member or list members |
@@ -107,7 +112,7 @@ Every path that belongs to a tenant starts with `/organisations/{organisation_id
 - **Updates.** `PUT` replaces every editable field. Deleting an organisation, location or resource that still has locations, resources or bookings is refused with `409`.
 - **Time.** Request timestamps must include a UTC offset, and responses are in UTC. Opening hours and booking rules use the location's time zone.
 - **Money.** Prices are integers in minor units, such as cents, of the organisation's currency. The currency is set when the organisation is created and never changes.
-- **Pagination.** Lists return `{"items": [...], "next_cursor": "..."}`. Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last page. `limit` is 1 to 100 and defaults to 20.
+- **Pagination.** Lists return `{"items": [...], "next_cursor": "..."}`. Pass `next_cursor` back as `cursor` for the next page; it is `null` on the last page. `limit` is 1 to 100 and defaults to 20. Items come in the order they were created, except your bookings, which come soonest first.
 
 ### Roles
 
@@ -171,8 +176,66 @@ Errors that the HTTP status explains fully, such as `401 Unauthorized`, `403 For
 | Suite | What it proves |
 | --- | --- |
 | `tests/unit` | Booking rules, availability, pricing, roles and tokens, including daylight-saving changes. Runs in milliseconds without a database. |
-| `tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. A permission matrix calls every organisation endpoint as an anonymous caller, an outsider, a member, an admin and an owner, and fails if a new endpoint is missing from it. |
+| `tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. A permission matrix calls every organisation endpoint as an anonymous caller, an outsider, a member, an admin and an owner, and fails if a new endpoint is missing from it. The seed script runs here too, at a small scale. |
 | `tests/concurrency` | That exactly one of 50 simultaneous requests for a slot wins, and that 20 inserts released at the same instant end in one booking and clean conflicts, never deadlocks. |
+
+## Performance
+
+Phase 4 measured every hot query against realistic volume and added only the indexes that the numbers justified (ADR-0011). To reproduce the measurements:
+
+```bash
+make up        # a fresh stack, migrated to the latest revision
+make seed      # about three minutes
+make explain   # every query below, before and after the Phase 4 indexes
+```
+
+`make seed` builds 200 organisations from a fixed random seed, so every run has the same shape: a few large tenants and many small ones, a year of history and the 30 days ahead that the booking horizon allows. It refuses a database that already holds data. The seeded users are `user-00001@example.com` onwards, all with the password `holdfast-seed-password`.
+
+| Table | Rows |
+| --- | ---: |
+| Bookings, 8% of them cancelled | 1,029,604 |
+| Refresh tokens | 503,314 |
+| Memberships | 17,200 |
+| Users | 16,313 |
+| Resources | 3,380 |
+| Locations | 288 |
+| Organisations | 200 |
+
+`make explain` runs the exact SQL the application sends, captured from SQLAlchemy, with the heaviest parameters the data holds, such as the busiest resource and the user with the most bookings. "Before" drops the Phase 4 indexes inside a transaction that is rolled back, so both sides run on the same data. Each time is the median of seven warm runs on a development machine, in Docker Desktop on Windows. Times vary from run to run, the slow ones by as much as double, but the plans stay the same.
+
+| Query | Before | After | Served by |
+| --- | ---: | ---: | --- |
+| My upcoming bookings, for the user with 3,123 bookings | 117.6 ms | 1.10 ms | `ix_bookings_active_user_id_end` |
+| A resource's bookings, first page | 21.5 ms | 0.17 ms | `ix_bookings_resource_id_id` |
+| The same list for a plain member, who sees only their own | 85.3 ms | 5.02 ms | `ix_bookings_resource_id_id` |
+| Delete a resource that has no bookings | 154.4 ms | 0.42 ms | `ix_bookings_resource_id_id` |
+| My organisations | 2.18 ms | 0.32 ms | `ix_memberships_user_id` |
+| Log out of a sign-in with 202 refresh tokens | 112.3 ms | 9.04 ms | `ix_refresh_tokens_family_id` |
+| A resource's availability on its busiest day | 0.21 ms | 0.20 ms | The exclusion constraint's index |
+| Book a free slot | 0.85 ms | 0.70 ms | Writes two more index entries |
+
+### What each index is for
+
+- **`ix_bookings_active_user_id_end`** on `(user_id, upper(period)) WHERE status <> 'cancelled'`, 36 MB. "My upcoming bookings" wants a user's active bookings that have not ended. Without it, Postgres scanned all million bookings in parallel. Keyed by end time, the unfinished bookings form one short range at the end of each user's entries, so Postgres reads only those: 118 of the busiest user's 3,123, never more than the 30-day horizon allows, then sorts them by start. Keyed by start time, it could not tell where the unfinished ones begin and would read the user's whole history. Cancelled bookings never appear in the list, so the index leaves them out; its condition and the exclusion constraint's come from one constant in `records.py`.
+- **`ix_bookings_resource_id_id`** on `(resource_id, id)`, 49 MB. A page of a resource's bookings walks this index from the cursor and stops after 21 entries, reading 24 buffers. Without it, Postgres walked the primary key and discarded 21,000 bookings of other resources. It also serves the foreign key from bookings to resources: Postgres does not index foreign keys by itself, so deleting an unused resource scanned every booking to prove that none referred to it. A plain member's view still reads all of the resource's bookings to find their own. That is 5 ms on the busiest resource, and members have `/users/me/bookings` for their own list, so it gets no index of its own.
+- **`ix_memberships_user_id`** on `(user_id)`, 528 kB. The primary key `(organisation_id, user_id)` cannot find one user's memberships, so listing your organisations scanned all 17,200 memberships, a cost that grows with every member of every organisation.
+- **`ix_refresh_tokens_family_id`** on `(family_id)`, 4 MB, small because B-tree deduplication stores a repeated family id once, with a list of the rows that hold it. A logout or a replayed token revokes the whole family; without it, Postgres scanned all 503,314 tokens. Finding the 202 tokens now takes 0.6 ms. The rest is writing 202 new row versions, and a typical sign-in has only 15 tokens.
+
+**Availability needs no new index.** The exclusion constraint keeps a GiST index on `(resource_id, period)` for active bookings, which is exactly what availability asks: an index-only scan that reads 5 buffers.
+
+**What the indexes cost.** The two new booking indexes add 85 MB to a 139 MB table, and each booking writes two more index entries: three more buffers touched per insert, a difference lost in the noise of a single insert. Migration 0005 builds the indexes with `CREATE INDEX CONCURRENTLY`, so bookings keep flowing while it runs; on this data it took 18 seconds.
+
+### Offset versus keyset pagination
+
+The busiest resource has 2,013 bookings, so the last page of its list is about 100 pages deep.
+
+| Depth | `OFFSET` | Keyset |
+| ---: | ---: | ---: |
+| 0 | 0.17 ms | 0.12 ms |
+| 1,006 | 7.08 ms | 0.18 ms |
+| 1,993 | 9.09 ms | 0.31 ms |
+
+`OFFSET` has to produce every row before the page and throw it away. For a deep page Postgres stops following the index and instead fetches all of the resource's bookings, spread over about 1,900 table pages, to sort them, so the cost grows with the list. A keyset page asks for the rows after the last one seen, which the index finds directly, so every page reads about 25 buffers however deep it is. Every list in the API pages by keyset (ADR-0010).
 
 ## Architecture
 
@@ -198,6 +261,9 @@ holdfast-booking-platform/
 │   ├── repositories/      # table mappings and all SQL
 │   └── core/              # settings, password hashing and tokens
 ├── migrations/            # Alembic environment and versioned migrations
+├── scripts/
+│   ├── seed.py            # realistic volume for measuring queries
+│   └── explain.py         # EXPLAIN ANALYZE of the hot queries
 ├── tests/
 │   ├── unit/              # domain rules, no database
 │   ├── integration/       # through HTTP against a real Postgres
@@ -372,6 +438,39 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 **Decision.** Option 3. Every organisation-scoped use case starts with `require_membership`, which reports outsiders as `404`, exactly like an organisation that does not exist, and members below the required role as `403`. The rules about who may manage whom and who sees every booking live in the domain's `Membership`. Any change to memberships first locks the organisation's row, so two owners who step down at the same moment cannot leave it without an owner.
 
 **Consequences.** A permission matrix calls every organisation endpoint as five kinds of caller, and a test fails when a new endpoint is missing from it. Every service function takes the caller's id. Outsiders cannot tell an organisation that exists from one that does not.
+
+</details>
+
+<details>
+<summary><strong>ADR-0010: Lists page by keyset, never by offset</strong> (Accepted, 2026-11-10)</summary>
+
+**Context.** Every list endpoint returns pages, and some lists grow without end: a resource gains bookings every day it exists. Phase 1 adopted opaque cursors; Phase 4 measured the alternative at depth.
+
+**Options considered.**
+
+1. *`OFFSET` and `LIMIT`.* Simple, and clients can jump to any page, but Postgres produces and discards every row before the page, so deep pages get slower. A row inserted between two requests also shifts every later page, repeating or skipping an item.
+2. *Keyset pagination.* Each page asks for the rows after the last one seen, which an index finds directly, so every page costs the same and new rows shift nothing. There are no page numbers or totals.
+
+**Decision.** Keyset pagination behind an opaque cursor that holds the last item's id. Lists are sorted by their UUIDv7 id, which is creation order. Your upcoming bookings are sorted by start time and then id; their cursor still holds only the id, and the booking's start is looked up from it. On the busiest resource, the last page took 9.09 ms with `OFFSET` and 0.31 ms with a cursor.
+
+**Consequences.** A page costs the same however deep a client reads. Clients cannot jump to a page number or show a total count. Each list needs an index that matches its order, such as `(resource_id, id)` for a resource's bookings. Cursors are opaque, so their encoding can change without breaking clients.
+
+</details>
+
+<details>
+<summary><strong>ADR-0011: Indexes follow measured queries and are built concurrently</strong> (Accepted, 2026-11-10)</summary>
+
+**Context.** An index speeds up the reads that use it, but slows every write to its table and takes space. Which queries need one only shows at volume. The bookings table must keep taking writes while an index is being added.
+
+**Options considered.**
+
+1. *Index every foreign key and filtered column up front.* A simple rule, but it builds indexes that no query uses and misses those that need an expression or a condition, such as a booking's end time or only active bookings.
+2. *Wait for slow queries in production.* Real evidence, but only after users have suffered for it.
+3. *Measure plans on seeded volume and add what the numbers justify.* A seed builds a realistic million bookings, and a script compares each hot query's plan with and without the candidate indexes.
+
+**Decision.** Option 3, through `make seed` and `make explain`, with the results recorded under Performance. Migrations build indexes with `CREATE INDEX CONCURRENTLY`, which does not block writes but cannot run inside a transaction.
+
+**Consequences.** Every index has a measured reason, and a query that is already fast, such as availability, gets none. Each booking now writes two more index entries. A migration that builds indexes concurrently is not atomic: if a build fails, it leaves an invalid index that must be dropped before the migration runs again. The numbers need measuring again whenever the shape of the data changes.
 
 </details>
 
