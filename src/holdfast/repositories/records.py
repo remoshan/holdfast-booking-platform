@@ -10,10 +10,12 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     MetaData,
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, Range
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -31,6 +33,8 @@ NAMING_CONVENTION = {
     "pk": "pk_%(table_name)s",
 }
 NO_OVERLAP_CONSTRAINT = "ex_bookings_no_overlap"
+ACTIVE_BOOKING = "status <> 'cancelled'"
+"""The rows of bookings that still hold their time. It mirrors INACTIVE_STATUSES."""
 
 
 class Base(DeclarativeBase):
@@ -70,7 +74,8 @@ class RefreshTokenRecord(EntityRecord):
     __tablename__ = "refresh_tokens"
 
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    family_id: Mapped[UUID]
+    # A replayed token or a logout revokes the whole family at once.
+    family_id: Mapped[UUID] = mapped_column(index=True)
     token_hash: Mapped[str] = mapped_column(unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -91,7 +96,8 @@ class MembershipRecord(Base):
     organisation_id: Mapped[UUID] = mapped_column(
         ForeignKey("organisations.id", ondelete="CASCADE"), primary_key=True
     )
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    # The primary key leads with organisation_id; finding a user's organisations needs this.
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True, index=True)
     role: Mapped[Role] = mapped_column(_string_enum(Role, "membership_role"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # Joined into every query, so a membership always arrives with its member's email.
@@ -139,13 +145,24 @@ class BookingRecord(EntityRecord):
         CheckConstraint("NOT isempty(period)", name="period_not_empty"),
         CheckConstraint("price >= 0", name="price_not_negative"),
         # Postgres rejects an active booking that overlaps another on the same resource, so
-        # concurrent requests can never both win. The condition mirrors INACTIVE_STATUSES.
+        # concurrent requests can never both win. Its index also serves availability.
         ExcludeConstraint(
             ("resource_id", "="),
             ("period", "&&"),
             name=NO_OVERLAP_CONSTRAINT,
             using="gist",
-            where="status <> 'cancelled'",
+            where=ACTIVE_BOOKING,
+        ),
+        # A resource's bookings in key order, for keyset pages and for the foreign-key check
+        # when a resource is deleted.
+        Index("ix_bookings_resource_id_id", "resource_id", "id"),
+        # A user's active bookings in order of end time, so the ones that have not ended form
+        # one short range at the end of the user's entries, however long their history.
+        Index(
+            "ix_bookings_active_user_id_end",
+            "user_id",
+            text("upper(period)"),
+            postgresql_where=text(ACTIVE_BOOKING),
         ),
     )
 

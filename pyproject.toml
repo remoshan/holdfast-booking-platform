@@ -47,11 +47,13 @@ select = ["E", "W", "F", "I", "N", "UP", "B", "S", "C4", "SIM", "PT", "ASYNC", "
 [tool.ruff.lint.per-file-ignores]
 # Tests assert, and sign in with fixed fake credentials.
 "tests/**" = ["S101", "S105", "S106"]
+# Seed data needs repeatable randomness, not secrecy.
+"scripts/**" = ["S311"]
 
 [tool.mypy]
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["src", "tests", "migrations"]
+files = ["src", "tests", "migrations", "scripts"]
 # Name modules after their path (tests.unit.conftest), so the two conftest.py files don't clash.
 mypy_path = ["src"]
 explicit_package_bases = true
@@ -88,4 +90,6 @@ forbidden_modules = ["fastapi", "pydantic", "sqlalchemy", "starlette"]
 strict = true
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib"]
+# Lets tests import the scripts they cover, such as scripts.seed.
+pythonpath = ["."]
 filterwarnings = ["error"]
