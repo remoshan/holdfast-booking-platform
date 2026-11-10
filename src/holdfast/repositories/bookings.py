@@ -1,18 +1,20 @@
-"""Persistence for bookings. Every query is scoped to one organisation or one resource."""
+"""Persistence for bookings. Every query is scoped to one organisation, one resource or the
+bookings of one user."""
 
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import DateTime, Function, exists, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import Range, insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute, aliased
 
 from holdfast.domain.bookings import INACTIVE_STATUSES, Booking, BookingStatus
 from holdfast.domain.errors import BookingConflictError, NotFoundError
 from holdfast.domain.pagination import Page
 from holdfast.domain.periods import Period
-from holdfast.repositories.pagination import fetch_page
-from holdfast.repositories.records import NO_OVERLAP_CONSTRAINT, BookingRecord
+from holdfast.repositories.pagination import fetch_page, fetch_sorted_page
+from holdfast.repositories.records import NO_OVERLAP_CONSTRAINT, BookingRecord, MembershipRecord
 
 
 async def add(
@@ -76,6 +78,37 @@ async def list_page(
     return await fetch_page(session, query, BookingRecord.id, after, limit, _to_booking)
 
 
+async def list_upcoming(
+    session: AsyncSession, user_id: UUID, now: datetime, after: UUID | None, limit: int
+) -> Page[Booking]:
+    """A page of the user's active bookings that have not ended by `now`, soonest first, in the
+    organisations they still belong to.
+
+    The list is sorted by start, then id. Its cursor is the id of the previous page's last
+    booking, like every other list's, and that booking's start is looked up to continue after it.
+    """
+    start = _start_of(BookingRecord.period)
+    query = select(BookingRecord).where(
+        BookingRecord.user_id == user_id,
+        BookingRecord.status.not_in(INACTIVE_STATUSES),
+        _end_of(BookingRecord.period) > now,
+        exists().where(
+            MembershipRecord.organisation_id == BookingRecord.organisation_id,
+            MembershipRecord.user_id == user_id,
+        ),
+    )
+    if after is not None:
+        previous = aliased(BookingRecord)
+        previous_start = (
+            select(_start_of(previous.period))
+            .where(previous.id == after, previous.user_id == user_id)
+            .scalar_subquery()
+        )
+        query = query.where(tuple_(start, BookingRecord.id) > tuple_(previous_start, after))
+    sorted_query = query.order_by(start, BookingRecord.id)
+    return await fetch_sorted_page(session, sorted_query, BookingRecord.id, limit, _to_booking)
+
+
 async def active_periods(session: AsyncSession, resource_id: UUID, window: Period) -> list[Period]:
     """The periods of the resource's active bookings that overlap the window."""
     ranges = await session.scalars(
@@ -92,6 +125,14 @@ async def save_status(session: AsyncSession, booking: Booking) -> None:
     await session.execute(
         update(BookingRecord).where(BookingRecord.id == booking.id).values(status=booking.status)
     )
+
+
+def _start_of(period: InstrumentedAttribute[Range[datetime]]) -> Function[datetime]:
+    return func.lower(period, type_=DateTime(timezone=True))
+
+
+def _end_of(period: InstrumentedAttribute[Range[datetime]]) -> Function[datetime]:
+    return func.upper(period, type_=DateTime(timezone=True))
 
 
 def _to_range(period: Period) -> Range[datetime]:

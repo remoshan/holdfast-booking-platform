@@ -43,6 +43,14 @@ async def list_bookings(
         )
 
 
+async def list_upcoming_bookings(
+    session: AsyncSession, actor_id: UUID, after: UUID | None, limit: int
+) -> Page[Booking]:
+    """The caller's own bookings that have not ended, across the organisations they belong to."""
+    async with session.begin():
+        return await bookings.list_upcoming(session, actor_id, datetime.now(UTC), after, limit)
+
+
 async def get_booking(
     session: AsyncSession, actor_id: UUID, organisation_id: UUID, booking_id: UUID
 ) -> Booking:

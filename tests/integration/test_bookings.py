@@ -1,11 +1,15 @@
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from fastapi import status
+from fastapi import FastAPI, status
 from httpx import AsyncClient, Response
+
+from holdfast.domain.bookings import Booking
+from holdfast.domain.periods import Period
+from holdfast.repositories import bookings
 
 pytestmark = pytest.mark.anyio
 
@@ -219,3 +223,107 @@ async def test_members_can_cancel_their_own_bookings(
 
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["status"] == "cancelled"
+
+
+async def test_upcoming_bookings_are_your_own_soonest_first_in_every_organisation(
+    client: AsyncClient,
+    organisation: Json,
+    book: Book,
+    add_member: Factory,
+    create_organisation: Factory,
+    create_location: Factory,
+    create_resource: Factory,
+    at: Callable[..., str],
+) -> None:
+    later = (await book("09:00", "10:00", days_ahead=7)).json()
+    sooner = (await book("14:00", "15:00", days_ahead=3)).json()
+    member = await add_member(organisation["id"], "member")
+    await book("11:00", "12:00", headers=member["headers"])
+    other = await create_organisation(slug="other")
+    other_resource = await create_resource(other["id"], (await create_location(other["id"]))["id"])
+    elsewhere = await client.post(
+        f"/organisations/{other['id']}/resources/{other_resource['id']}/bookings",
+        json={"start": at("09:00", days_ahead=5), "end": at("10:00", days_ahead=5)},
+    )
+
+    response = await client.get("/users/me/bookings")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {"items": [sooner, elsewhere.json(), later], "next_cursor": None}
+
+
+async def test_upcoming_bookings_keep_one_in_progress_but_drop_ended_and_cancelled(
+    app: FastAPI, client: AsyncClient, organisation: Json, resource: Json, user: Json, book: Book
+) -> None:
+    now = datetime.now(UTC)
+    await _write_booking(app, organisation, resource, user, now - timedelta(hours=2), now)
+    in_progress = await _write_booking(
+        app, organisation, resource, user, now, now + timedelta(hours=1)
+    )
+    cancelled = (await book("09:00", "10:00")).json()
+    await client.post(f"/organisations/{organisation['id']}/bookings/{cancelled['id']}/cancel")
+
+    response = await client.get("/users/me/bookings")
+
+    assert [item["id"] for item in response.json()["items"]] == [str(in_progress.id)]
+
+
+async def test_upcoming_bookings_leave_out_organisations_you_have_left(
+    client: AsyncClient, organisation: Json, book: Book, add_member: Factory
+) -> None:
+    member = await add_member(organisation["id"], "member")
+    await book("09:00", "10:00", headers=member["headers"])
+    before = await client.get("/users/me/bookings", headers=member["headers"])
+
+    await client.delete(f"/organisations/{organisation['id']}/members/{member['id']}")
+    after = await client.get("/users/me/bookings", headers=member["headers"])
+
+    assert len(before.json()["items"]) == 1
+    assert after.json() == {"items": [], "next_cursor": None}
+
+
+async def test_upcoming_bookings_page_by_start_then_id(
+    client: AsyncClient,
+    organisation: Json,
+    location: Json,
+    book: Book,
+    create_resource: Factory,
+    at: Callable[..., str],
+) -> None:
+    second_room = await create_resource(organisation["id"], location["id"], name="Room 2")
+    first_room_booking = (await book("09:00", "10:00")).json()
+    second_room_booking = await client.post(
+        f"/organisations/{organisation['id']}/resources/{second_room['id']}/bookings",
+        json={"start": at("09:00"), "end": at("10:00")},
+    )
+    last = (await book("11:00", "12:00")).json()
+    same_start = sorted(
+        [first_room_booking, second_room_booking.json()], key=lambda item: UUID(item["id"])
+    )
+
+    seen: list[Json] = []
+    cursor: str | None = None
+    for _ in range(3):
+        params = {"limit": 1} | ({"cursor": cursor} if cursor else {})
+        page = (await client.get("/users/me/bookings", params=params)).json()
+        seen += page["items"]
+        cursor = page["next_cursor"]
+
+    assert seen == [*same_start, last]
+    assert cursor is None
+
+
+async def _write_booking(
+    app: FastAPI, organisation: Json, resource: Json, user: Json, start: datetime, end: datetime
+) -> Booking:
+    """Write a booking straight to the database, as the API refuses bookings that start in the
+    past."""
+    async with app.state.sessions() as session, session.begin():
+        return await bookings.add(
+            session,
+            UUID(organisation["id"]),
+            UUID(resource["id"]),
+            UUID(user["id"]),
+            Period(start, end),
+            price=0,
+        )

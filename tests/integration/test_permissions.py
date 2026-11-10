@@ -75,6 +75,7 @@ PUBLIC_ENDPOINTS = {
 }
 ENDPOINTS_OUTSIDE_ORGANISATIONS = {
     ("GET", "/users/me"),
+    ("GET", "/users/me/bookings"),
     ("POST", "/organisations"),
     ("GET", "/organisations"),
 }
