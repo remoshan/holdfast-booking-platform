@@ -15,8 +15,10 @@ services:
       POSTGRES_USER: holdfast
       POSTGRES_PASSWORD: holdfast
       POSTGRES_DB: holdfast
+    # An uncommon port on this machine only: no clash with other Postgres servers on the host,
+    # and the development password never faces the network.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:54320:5432"
     volumes:
       - database-data:/var/lib/postgresql
     healthcheck:
@@ -34,8 +36,9 @@ services:
 
   api:
     <<: *holdfast-app
+    # This machine only: seeded accounts share a published password.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
