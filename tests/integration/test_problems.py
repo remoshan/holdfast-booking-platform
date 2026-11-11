@@ -2,7 +2,7 @@ import pytest
 from fastapi import status
 from httpx import ASGITransport, AsyncClient
 
-from holdfast.core.config import Settings
+from holdfast.core.config import ApiSettings
 from holdfast.main import create_app
 
 pytestmark = pytest.mark.anyio
@@ -56,7 +56,7 @@ async def test_openapi_documents_errors_as_problem_details(client: AsyncClient) 
 
 async def test_unexpected_errors_hide_their_details() -> None:
     app = create_app(
-        Settings(
+        ApiSettings(
             database_url="postgresql+asyncpg://unused@localhost/unused",
             jwt_secret="a-secret-used-only-by-the-test-suite",
         )

@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from holdfast.domain.bookings import BookingStatus
+from holdfast.domain.jobs import JobKind, JobStatus
 from holdfast.domain.memberships import Role
 from holdfast.domain.resources import ResourceKind
 
@@ -32,8 +33,7 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
-NO_OVERLAP_CONSTRAINT = "ex_bookings_no_overlap"
-ACTIVE_BOOKING = "status <> 'cancelled'"
+ACTIVE_BOOKING = "status NOT IN ('cancelled', 'expired')"
 """The rows of bookings that still hold their time. It mirrors INACTIVE_STATUSES."""
 
 
@@ -144,12 +144,13 @@ class BookingRecord(EntityRecord):
         ),
         CheckConstraint("NOT isempty(period)", name="period_not_empty"),
         CheckConstraint("price >= 0", name="price_not_negative"),
+        CheckConstraint("status <> 'held' OR expires_at IS NOT NULL", name="held_has_expiry"),
         # Postgres rejects an active booking that overlaps another on the same resource, so
         # concurrent requests can never both win. Its index also serves availability.
         ExcludeConstraint(
             ("resource_id", "="),
             ("period", "&&"),
-            name=NO_OVERLAP_CONSTRAINT,
+            name="ex_bookings_no_overlap",
             using="gist",
             where=ACTIVE_BOOKING,
         ),
@@ -164,6 +165,15 @@ class BookingRecord(EntityRecord):
             text("upper(period)"),
             postgresql_where=text(ACTIVE_BOOKING),
         ),
+        # One booking per idempotency key and user, so a retried request finds the booking its
+        # first attempt made instead of making another.
+        Index(
+            "uq_bookings_user_id_idempotency_key",
+            "user_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     organisation_id: Mapped[UUID]
@@ -172,3 +182,18 @@ class BookingRecord(EntityRecord):
     period: Mapped[Range[datetime]] = mapped_column(TSTZRANGE)
     status: Mapped[BookingStatus] = mapped_column(_string_enum(BookingStatus, "booking_status"))
     price: Mapped[int]
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str | None]
+
+
+class JobRecord(EntityRecord):
+    __tablename__ = "jobs"
+    # Status first, so that dead jobs never sit in front of the due ones the worker looks for.
+    __table_args__ = (Index("ix_jobs_status_run_at", "status", "run_at"),)
+
+    kind: Mapped[JobKind] = mapped_column(_string_enum(JobKind, "job_kind"))
+    payload: Mapped[dict[str, str]] = mapped_column(JSONB)
+    status: Mapped[JobStatus] = mapped_column(_string_enum(JobStatus, "job_status"))
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(server_default="0")
+    last_error: Mapped[str | None]
