@@ -1,7 +1,8 @@
-"""Measure Holdfast's hot queries with EXPLAIN ANALYZE, before and after the Phase 4 indexes.
+"""Measure Holdfast's hot queries with EXPLAIN ANALYZE, before and after the indexes added for
+them.
 
 Every query is the exact SQL the application sends: a repository function runs and SQLAlchemy's
-statements are captured on their way to Postgres. "Before" drops this phase's indexes inside a
+statements are captured on their way to Postgres. "Before" drops those indexes inside a
 transaction that is rolled back, so both sides run on the same data and the database is left as
 it was. Each side reports the median of several warm runs. Run it on seeded data:
 
@@ -24,15 +25,16 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, c
 
 from holdfast.domain.periods import Period
 from holdfast.domain.resources import ResourceKind
-from holdfast.repositories import bookings, organisations, refresh_tokens, resources
+from holdfast.repositories import bookings, jobs, organisations, refresh_tokens, resources
 from holdfast.repositories.records import BookingRecord, ResourceRecord
 
 LOCAL_DATABASE_URL = "postgresql+asyncpg://holdfast:holdfast@127.0.0.1:54320/holdfast"
-PHASE_4_INDEXES = (
+MEASURED_INDEXES = (
     "ix_bookings_resource_id_id",
     "ix_bookings_active_user_id_end",
     "ix_memberships_user_id",
     "ix_refresh_tokens_family_id",
+    "ix_jobs_queued_run_at",
 )
 WARM_UP_RUNS = 1
 MEASURED_RUNS = 7
@@ -67,9 +69,9 @@ RAREST_BOOKER = text(
 )
 SIZES = text(
     "SELECT relname, pg_size_pretty(pg_relation_size(relid)) FROM pg_stat_user_tables"
-    " WHERE relname IN ('bookings', 'memberships', 'refresh_tokens')"
-    " UNION ALL SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid))"
-    " FROM pg_stat_user_indexes WHERE relname IN ('bookings', 'memberships', 'refresh_tokens')"
+    " WHERE relname IN ('bookings', 'memberships', 'refresh_tokens', 'jobs')"
+    " UNION ALL SELECT indexrelname, pg_size_pretty(pg_relation_size(indexrelid)) FROM"
+    " pg_stat_user_indexes WHERE relname IN ('bookings', 'memberships', 'refresh_tokens', 'jobs')"
 )
 
 type Scenario = Callable[[AsyncSession], Awaitable[object]]
@@ -92,8 +94,8 @@ async def main(database_url: str) -> None:
     try:
         for title, scenario in await _scenarios(engine):
             statements = await _capture(engine, scenario)
-            before = await _measure(engine, statements, without_phase_4_indexes=True)
-            after = await _measure(engine, statements, without_phase_4_indexes=False)
+            before = await _measure(engine, statements, without_indexes=True)
+            after = await _measure(engine, statements, without_indexes=False)
             print(f"## {title}\n")
             print(f"Before: {before.median_ms:.3f} ms   After: {after.median_ms:.3f} ms\n")
             print(f"Before:\n{before.plan}\n\nAfter:\n{after.plan}\n")
@@ -205,6 +207,10 @@ async def _scenarios(engine: AsyncEngine) -> list[tuple[str, Scenario]]:
         ),
         ("Delete a resource that has no bookings", delete_an_unused_resource),
         (
+            "A worker's poll for the most overdue job among the seeded reminders",
+            lambda session: jobs.claim_next(session, now),
+        ),
+        (
             "Book a free slot: the write that every booking index slows down",
             lambda session: bookings.add(
                 session, organisation_id, resource_id, heaviest_booker, free_slot, price=0
@@ -252,7 +258,7 @@ async def _capture(engine: AsyncEngine, scenario: Scenario) -> list[Statement]:
 
 
 async def _measure(
-    engine: AsyncEngine, statements: Sequence[Statement], *, without_phase_4_indexes: bool
+    engine: AsyncEngine, statements: Sequence[Statement], *, without_indexes: bool
 ) -> Measurement:
     """EXPLAIN ANALYZE the scenario's last statement after replaying the ones before it, each
     run in its own transaction that is rolled back."""
@@ -261,8 +267,8 @@ async def _measure(
     plan = ""
     for _ in range(WARM_UP_RUNS + MEASURED_RUNS):
         async with engine.connect() as connection:
-            if without_phase_4_indexes:
-                await _drop_phase_4_indexes(connection)
+            if without_indexes:
+                await _drop_measured_indexes(connection)
             for statement in setup:
                 await connection.exec_driver_sql(statement.sql, statement.parameters)
             rows = await connection.exec_driver_sql(
@@ -274,8 +280,8 @@ async def _measure(
     return Measurement(statistics.median(timings[WARM_UP_RUNS:]), plan)
 
 
-async def _drop_phase_4_indexes(connection: AsyncConnection) -> None:
-    for name in PHASE_4_INDEXES:
+async def _drop_measured_indexes(connection: AsyncConnection) -> None:
+    for name in MEASURED_INDEXES:
         await connection.exec_driver_sql(f"DROP INDEX IF EXISTS {name}")
 
 

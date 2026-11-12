@@ -66,7 +66,7 @@ include_external_packages = true
 name = "Layers only import the layers below them"
 type = "layers"
 layers = [
-    "holdfast.main",
+    "holdfast.main | holdfast.worker",
     "holdfast.api",
     "holdfast.services",
     "holdfast.repositories",

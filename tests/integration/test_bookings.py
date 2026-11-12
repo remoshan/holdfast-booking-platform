@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI, status
 from httpx import AsyncClient, Response
 
-from holdfast.domain.bookings import Booking
+from holdfast.domain.bookings import HOLD_DURATION, Booking
 from holdfast.domain.periods import Period
 from holdfast.repositories import bookings
 
@@ -21,19 +21,30 @@ type Book = Callable[..., Awaitable[Response]]
 async def test_book_resource(
     book: Book, organisation: Json, resource: Json, user: Json, at: Callable[..., str]
 ) -> None:
+    before = datetime.now(UTC)
     response = await book("09:00", "10:30")
+    after = datetime.now(UTC)
 
     assert response.status_code == status.HTTP_201_CREATED
     booking = response.json()
     assert booking["resource_id"] == resource["id"]
     assert booking["user_id"] == user["id"]
-    assert booking["status"] == "confirmed"
+    assert booking["status"] == "held"
     assert datetime.fromisoformat(booking["start"]) == datetime.fromisoformat(at("09:00"))
     assert datetime.fromisoformat(booking["end"]) == datetime.fromisoformat(at("10:30"))
     assert booking["price"] == 3000  # 1.5 hours at 2000 per hour
+    hold_expires_at = datetime.fromisoformat(booking["hold_expires_at"])
+    assert before + HOLD_DURATION <= hold_expires_at <= after + HOLD_DURATION
     assert response.headers["Location"] == (
         f"http://test/organisations/{organisation['id']}/bookings/{booking['id']}"
     )
+
+
+async def test_a_free_booking_is_confirmed_at_once(book: Book, free_resource: Json) -> None:
+    response = await book("09:00", "10:00", resource_id=free_resource["id"])
+
+    assert response.status_code == status.HTTP_201_CREATED
+    assert (response.json()["status"], response.json()["hold_expires_at"]) == ("confirmed", None)
 
 
 async def test_overlapping_booking_is_rejected(book: Book) -> None:
@@ -182,6 +193,122 @@ async def test_cancel_unknown_booking_returns_404(client: AsyncClient, organisat
     assert response.status_code == status.HTTP_404_NOT_FOUND
 
 
+async def test_confirm_a_held_booking(client: AsyncClient, organisation: Json, book: Book) -> None:
+    booking = (await book("09:00", "10:00")).json()
+    path = f"/organisations/{organisation['id']}/bookings/{booking['id']}"
+
+    response = await client.post(f"{path}/confirm")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == booking | {"status": "confirmed"}
+    assert (await client.get(path)).json()["status"] == "confirmed"
+
+
+async def test_confirming_twice_returns_the_confirmed_booking(
+    client: AsyncClient, organisation: Json, book: Book
+) -> None:
+    booking = (await book("09:00", "10:00")).json()
+    confirm_path = f"/organisations/{organisation['id']}/bookings/{booking['id']}/confirm"
+    first = await client.post(confirm_path)
+
+    second = await client.post(confirm_path)
+
+    assert second.status_code == status.HTTP_200_OK
+    assert second.json() == first.json()
+
+
+async def test_a_cancelled_booking_cannot_be_confirmed(
+    client: AsyncClient, organisation: Json, book: Book
+) -> None:
+    booking = (await book("09:00", "10:00")).json()
+    path = f"/organisations/{organisation['id']}/bookings/{booking['id']}"
+    await client.post(f"{path}/cancel")
+
+    response = await client.post(f"{path}/confirm")
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert response.json()["detail"] == "A booking that is cancelled cannot be confirmed."
+
+
+async def test_a_hold_that_has_run_out_cannot_be_confirmed(
+    app: FastAPI, client: AsyncClient, organisation: Json, resource: Json, user: Json
+) -> None:
+    """Even before the worker has released it: the hold's expiry decides, not the job."""
+    now = datetime.now(UTC)
+    start = now + timedelta(days=1)
+    booking = await _write_booking(
+        app, organisation, resource, user, start, start + timedelta(hours=1), held_until=now
+    )
+
+    response = await client.post(
+        f"/organisations/{organisation['id']}/bookings/{booking.id}/confirm"
+    )
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert response.json()["detail"] == "The hold on this booking has run out."
+
+
+async def test_a_repeated_idempotency_key_returns_the_first_booking(
+    client: AsyncClient, organisation: Json, resource: Json, book: Book
+) -> None:
+    key = {"Idempotency-Key": str(uuid4())}
+    first = await book("09:00", "10:00", headers=key)
+
+    retried = await book("09:00", "10:00", headers=key)
+
+    assert (first.status_code, retried.status_code) == (201, 201)
+    assert retried.json() == first.json()
+    assert retried.headers["Location"] == first.headers["Location"]
+    stored = await client.get(
+        f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings"
+    )
+    assert stored.json()["items"] == [first.json()]
+
+
+async def test_an_idempotency_key_cannot_be_reused_for_another_booking(book: Book) -> None:
+    key = {"Idempotency-Key": "my-first-booking"}
+    await book("09:00", "10:00", headers=key)
+
+    response = await book("11:00", "12:00", headers=key)
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["type"].endswith("#idempotency-key-reused")
+
+
+async def test_each_user_has_their_own_idempotency_keys(
+    organisation: Json, book: Book, add_member: Factory
+) -> None:
+    member = await add_member(organisation["id"], "member")
+    key = {"Idempotency-Key": "booking-1"}
+
+    owners = await book("09:00", "10:00", headers=key)
+    members = await book("11:00", "12:00", headers=key | member["headers"])
+
+    assert (owners.status_code, members.status_code) == (201, 201)
+    assert owners.json()["id"] != members.json()["id"]
+
+
+async def test_a_key_whose_request_failed_can_be_used_again(
+    client: AsyncClient, organisation: Json, book: Book, add_member: Factory
+) -> None:
+    member = await add_member(organisation["id"], "member")
+    taken = (await book("09:00", "10:00")).json()
+    retry = {"Idempotency-Key": "retry-me"} | member["headers"]
+    refused = await book("09:00", "10:00", headers=retry)
+    await client.post(f"/organisations/{organisation['id']}/bookings/{taken['id']}/cancel")
+
+    accepted = await book("09:00", "10:00", headers=retry)
+
+    assert (refused.status_code, accepted.status_code) == (409, 201)
+
+
+async def test_an_idempotency_key_has_at_most_255_characters(book: Book) -> None:
+    response = await book("09:00", "10:00", headers={"Idempotency-Key": "k" * 256})
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert [error["header"] for error in response.json()["errors"]] == ["Idempotency-Key"]
+
+
 async def test_members_list_only_their_own_bookings(
     client: AsyncClient, organisation: Json, resource: Json, book: Book, add_member: Factory
 ) -> None:
@@ -314,7 +441,13 @@ async def test_upcoming_bookings_page_by_start_then_id(
 
 
 async def _write_booking(
-    app: FastAPI, organisation: Json, resource: Json, user: Json, start: datetime, end: datetime
+    app: FastAPI,
+    organisation: Json,
+    resource: Json,
+    user: Json,
+    start: datetime,
+    end: datetime,
+    held_until: datetime | None = None,
 ) -> Booking:
     """Write a booking straight to the database, as the API refuses bookings that start in the
     past."""
@@ -326,4 +459,5 @@ async def _write_booking(
             UUID(user["id"]),
             Period(start, end),
             price=0,
+            hold_expires_at=held_until,
         )

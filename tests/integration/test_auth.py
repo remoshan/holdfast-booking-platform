@@ -1,8 +1,14 @@
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from fastapi import status
+from fastapi import FastAPI, status
 from httpx import AsyncClient
+from sqlalchemy import select, update
+
+from holdfast.core.security import hash_refresh_token
+from holdfast.repositories.records import RefreshTokenRecord
+from holdfast.services import auth
 
 pytestmark = pytest.mark.anyio
 
@@ -144,3 +150,43 @@ async def test_logging_out_one_sign_in_keeps_the_others(
     )
 
     assert refreshed.status_code == status.HTTP_200_OK
+
+
+async def test_the_purge_deletes_ended_sign_ins_and_keeps_live_ones_whole(
+    app: FastAPI, anonymous_client: AsyncClient, user: Json
+) -> None:
+    credentials = {"email": user["email"], "password": PASSWORD}
+    expired = (await anonymous_client.post("/auth/login", json=credentials)).json()
+    logged_out = (await anonymous_client.post("/auth/login", json=credentials)).json()
+    await anonymous_client.post("/auth/logout", json={"refresh_token": logged_out["refresh_token"]})
+    used = user["refresh_token"]
+    newest = (await anonymous_client.post("/auth/refresh", json={"refresh_token": used})).json()
+    await _expire_refresh_tokens(app, expired["refresh_token"], used)
+
+    async with app.state.sessions() as session:
+        await auth.purge_ended_sign_ins(session)
+
+    assert await _stored_token_hashes(app) == {
+        hash_refresh_token(used),
+        hash_refresh_token(newest["refresh_token"]),
+    }
+    # The used token still finds its sign-in, so sending it again still ends that sign-in.
+    replayed = await anonymous_client.post("/auth/refresh", json={"refresh_token": used})
+    after_replay = await anonymous_client.post(
+        "/auth/refresh", json={"refresh_token": newest["refresh_token"]}
+    )
+    assert (replayed.status_code, after_replay.status_code) == (401, 401)
+
+
+async def _expire_refresh_tokens(app: FastAPI, *tokens: str) -> None:
+    async with app.state.sessions() as session, session.begin():
+        await session.execute(
+            update(RefreshTokenRecord)
+            .where(RefreshTokenRecord.token_hash.in_(hash_refresh_token(token) for token in tokens))
+            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+
+
+async def _stored_token_hashes(app: FastAPI) -> set[str]:
+    async with app.state.sessions() as session:
+        return set(await session.scalars(select(RefreshTokenRecord.token_hash)))

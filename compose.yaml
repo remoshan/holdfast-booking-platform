@@ -1,12 +1,11 @@
 name: holdfast
 
-x-holdfast-app: &holdfast-app
+x-holdfast-image: &holdfast-image
   build: .
   image: holdfast:local
-  environment:
-    DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@database:5432/holdfast
-    # Local development only. Every deployed environment sets its own random secret.
-    JWT_SECRET: local-development-secret-never-used-anywhere-else
+
+x-database-url: &database-url
+  DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@database:5432/holdfast
 
 services:
   database:
@@ -27,21 +26,47 @@ services:
       timeout: 5s
       retries: 15
 
+  # Catches every email the worker sends; read them in its web interface on this machine.
+  mailpit:
+    image: axllent/mailpit:v1.33
+    ports:
+      - "127.0.0.1:8025:8025"
+
   migrate:
-    <<: *holdfast-app
+    <<: *holdfast-image
     command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *database-url
     depends_on:
       database:
         condition: service_healthy
 
   api:
-    <<: *holdfast-app
+    <<: *holdfast-image
+    environment:
+      <<: *database-url
+      # Local development only. Every deployed environment sets its own random secret.
+      JWT_SECRET: local-development-secret-never-used-anywhere-else
     # This machine only: seeded accounts share a published password.
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  worker:
+    <<: *holdfast-image
+    command: ["python", "-m", "holdfast.worker"]
+    environment:
+      <<: *database-url
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      MAIL_FROM: "Holdfast <reminders@example.com>"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
 
 volumes:
   database-data:

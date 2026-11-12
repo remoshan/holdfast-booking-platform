@@ -14,7 +14,7 @@ from holdfast.domain.errors import BookingConflictError, NotFoundError
 from holdfast.domain.pagination import Page
 from holdfast.domain.periods import Period
 from holdfast.repositories.pagination import fetch_page, fetch_sorted_page
-from holdfast.repositories.records import NO_OVERLAP_CONSTRAINT, BookingRecord, MembershipRecord
+from holdfast.repositories.records import BookingRecord, MembershipRecord
 
 
 async def add(
@@ -24,12 +24,17 @@ async def add(
     user_id: UUID,
     period: Period,
     price: int,
+    hold_expires_at: datetime | None = None,
+    idempotency_key: str | None = None,
 ) -> Booking:
-    """Insert a confirmed booking unless it overlaps an active booking of the same resource.
+    """Insert a booking, held until `hold_expires_at` if one is given and confirmed otherwise.
 
-    The exclusion constraint decides, so concurrent requests can never both win. Naming it in
-    ON CONFLICT DO NOTHING turns a lost race into "no row inserted". A plain INSERT would make
-    colliding transactions wait for each other, and Postgres would abort some as deadlocks.
+    Raises BookingConflictError if the booking overlaps an active booking of the same resource,
+    or if the user already made a booking with the same idempotency key; the caller tells the
+    two apart. The exclusion constraint and the key's unique index decide, so concurrent
+    requests can never both win. ON CONFLICT DO NOTHING, naming no constraint so that it covers
+    both, turns a lost race into "no row inserted". A plain INSERT would make colliding
+    transactions wait for each other, and Postgres would abort some as deadlocks.
     """
     record = await session.scalar(
         insert(BookingRecord)
@@ -38,10 +43,12 @@ async def add(
             resource_id=resource_id,
             user_id=user_id,
             period=_to_range(period),
-            status=BookingStatus.CONFIRMED,
+            status=BookingStatus.CONFIRMED if hold_expires_at is None else BookingStatus.HELD,
             price=price,
+            hold_expires_at=hold_expires_at,
+            idempotency_key=idempotency_key,
         )
-        .on_conflict_do_nothing(constraint=NO_OVERLAP_CONSTRAINT)
+        .on_conflict_do_nothing()
         .returning(BookingRecord)
     )
     if record is None:
@@ -49,15 +56,30 @@ async def add(
     return _to_booking(record)
 
 
-async def get(session: AsyncSession, organisation_id: UUID, booking_id: UUID) -> Booking:
-    record = await session.scalar(
-        select(BookingRecord).where(
-            BookingRecord.organisation_id == organisation_id, BookingRecord.id == booking_id
-        )
+async def get(
+    session: AsyncSession, organisation_id: UUID, booking_id: UUID, *, for_update: bool = False
+) -> Booking:
+    """The booking, locked until the transaction ends if `for_update` is set. A caller that
+    changes a booking's status locks it first, so that a concurrent change, such as a hold
+    expiring while it is confirmed, waits and then sees the new status."""
+    query = select(BookingRecord).where(
+        BookingRecord.organisation_id == organisation_id, BookingRecord.id == booking_id
     )
+    record = await session.scalar(query.with_for_update() if for_update else query)
     if record is None:
         raise NotFoundError("Booking", booking_id)
     return _to_booking(record)
+
+
+async def find_by_idempotency_key(
+    session: AsyncSession, user_id: UUID, idempotency_key: str
+) -> Booking | None:
+    record = await session.scalar(
+        select(BookingRecord).where(
+            BookingRecord.user_id == user_id, BookingRecord.idempotency_key == idempotency_key
+        )
+    )
+    return None if record is None else _to_booking(record)
 
 
 async def list_page(
@@ -154,5 +176,6 @@ def _to_booking(record: BookingRecord) -> Booking:
         period=_to_period(record.period),
         status=record.status,
         price=record.price,
+        hold_expires_at=record.hold_expires_at,
         created_at=record.created_at,
     )

@@ -4,7 +4,8 @@ The defaults build 200 organisations and about a million bookings: a year of his
 days ahead that the booking horizon allows. A few large tenants and many small ones make the data
 as skewed as real use. Organisations, locations and resources are written through the
 repositories, exactly as the API writes them. The high-volume tables are bulk loaded: users and
-memberships in multi-row inserts, bookings and refresh tokens through COPY. Postgres checks every
+memberships in multi-row inserts, bookings and refresh tokens through COPY, and the reminder jobs
+that the confirmed bookings ahead would have queued in one INSERT ... SELECT. Postgres checks every
 constraint, the exclusion constraint included, and the booking rules hold because every period is
 built with the domain's own code. Run it on an empty database migrated to the latest revision,
 such as a fresh `make up`:
@@ -24,7 +25,18 @@ from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
 
 import asyncpg  # type: ignore[import-untyped]  # asyncpg ships no type hints
-from sqlalchemy import ForeignKeyConstraint, Table, UniqueConstraint, func, insert, select, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKeyConstraint,
+    Insert,
+    Table,
+    UniqueConstraint,
+    func,
+    insert,
+    literal,
+    select,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import AddConstraint, CreateIndex, DropConstraint, DropIndex
@@ -36,13 +48,21 @@ from holdfast.core.security import (
     hash_refresh_token,
 )
 from holdfast.domain.bookings import BOOKING_HORIZON_DAYS, BookingStatus, price_for
+from holdfast.domain.jobs import JobKind, JobStatus
 from holdfast.domain.locations import Location, LocationDetails, OpeningHours, Weekday
 from holdfast.domain.memberships import Role
 from holdfast.domain.organisations import OrganisationDetails
 from holdfast.domain.periods import GRID_MINUTES, Period
+from holdfast.domain.reminders import REMINDER_LEAD
 from holdfast.domain.resources import Resource, ResourceDetails, ResourceKind
 from holdfast.repositories import locations, organisations, resources
-from holdfast.repositories.records import Base, MembershipRecord, UserRecord
+from holdfast.repositories.records import (
+    Base,
+    BookingRecord,
+    JobRecord,
+    MembershipRecord,
+    UserRecord,
+)
 
 LOCAL_DATABASE_URL = "postgresql+asyncpg://holdfast:holdfast@127.0.0.1:54320/holdfast"
 """The Compose database, where compose.yaml publishes it on this machine."""
@@ -162,6 +182,7 @@ async def seed(database_url: str, organisation_count: int, history_days: int) ->
             await _bulk_load(
                 session, tables["refresh_tokens"], REFRESH_TOKEN_COLUMNS, refresh_tokens
             )
+            await session.execute(_reminder_jobs(now))
         async with engine.connect() as connection:
             # Set the visibility map and gather statistics now, as autovacuum would in time.
             autocommit = await connection.execution_options(isolation_level="AUTOCOMMIT")
@@ -204,6 +225,25 @@ async def _bulk_load(
         await session.execute(CreateIndex(index))
     for constraint in deferred:
         await session.execute(AddConstraint(constraint))
+
+
+def _reminder_jobs(now: datetime) -> Insert:
+    """The reminders the API would have queued: one for each confirmed booking that starts more
+    than a day from now. Seeded bookings that cost something are confirmed, as if paid for."""
+    remind_at = func.lower(BookingRecord.period, type_=DateTime(timezone=True)) - REMINDER_LEAD
+    payload = func.jsonb_build_object(
+        "organisation_id", BookingRecord.organisation_id, "booking_id", BookingRecord.id
+    )
+    return insert(JobRecord).from_select(
+        ["kind", "payload", "status", "attempts", "run_at"],
+        select(
+            literal(JobKind.SEND_REMINDER),
+            payload,
+            literal(JobStatus.QUEUED),
+            literal(0),
+            remind_at,
+        ).where(BookingRecord.status == BookingStatus.CONFIRMED, remind_at > now),
+    )
 
 
 async def _add_organisations(

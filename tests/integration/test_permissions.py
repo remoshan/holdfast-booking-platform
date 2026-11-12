@@ -64,6 +64,7 @@ ENDPOINTS = (
     ),
     Endpoint("GET", ORGANISATION + "/resources/{resource_id}/bookings", "member", 200),
     Endpoint("GET", ORGANISATION + "/bookings/{booking_id}", "admin", 200, denied=404),
+    Endpoint("POST", ORGANISATION + "/bookings/{booking_id}/confirm", "admin", 200, denied=404),
     Endpoint("POST", ORGANISATION + "/bookings/{booking_id}/cancel", "admin", 200, denied=404),
 )
 PUBLIC_ENDPOINTS = {

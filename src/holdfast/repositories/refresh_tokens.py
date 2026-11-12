@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from holdfast.domain.users import RefreshTokenFamily
@@ -44,6 +44,28 @@ async def consume(
         )
     ).one_or_none()
     return None if consumed is None else RefreshTokenFamily(consumed.family_id, consumed.user_id)
+
+
+async def purge_ended_families(session: AsyncSession, now: datetime) -> None:
+    """Delete every family whose tokens have all expired or been revoked.
+
+    A family with a live token keeps its used and expired tokens too: when one of those is sent
+    again, it must still find its family so that the replay revokes the live token.
+    """
+    ended_families = (
+        select(RefreshTokenRecord.family_id)
+        .group_by(RefreshTokenRecord.family_id)
+        .having(
+            func.bool_and(
+                or_(
+                    RefreshTokenRecord.expires_at <= now, RefreshTokenRecord.revoked_at.is_not(None)
+                )
+            )
+        )
+    )
+    await session.execute(
+        delete(RefreshTokenRecord).where(RefreshTokenRecord.family_id.in_(ended_families))
+    )
 
 
 async def revoke_family_of(session: AsyncSession, token_hash: str, now: datetime) -> None:
