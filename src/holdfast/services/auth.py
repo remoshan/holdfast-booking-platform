@@ -70,6 +70,13 @@ async def log_out(session: AsyncSession, refresh_token: str) -> None:
         )
 
 
+async def purge_ended_sign_ins(session: AsyncSession) -> None:
+    """Delete the refresh tokens of every sign-in that has ended, all of them expired or
+    revoked. The worker runs this once a day."""
+    async with session.begin():
+        await refresh_tokens.purge_ended_families(session, datetime.now(UTC))
+
+
 async def _issue_tokens(
     session: AsyncSession, user_id: UUID, family_id: UUID, secret: str, now: datetime
 ) -> IssuedTokens:

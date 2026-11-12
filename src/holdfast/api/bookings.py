@@ -1,10 +1,10 @@
 """Bookings: claims on a resource for a period of time."""
 
 from datetime import UTC, datetime
-from typing import Self
+from typing import Annotated, Self
 from uuid import UUID
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Header, Request, Response, status
 from pydantic import AwareDatetime, Field, model_validator
 
 from holdfast.api.dependencies import CurrentUserId, DatabaseSession
@@ -15,6 +15,19 @@ from holdfast.domain.periods import Period
 from holdfast.services import bookings as service
 
 router = APIRouter(prefix="/organisations/{organisation_id}", tags=["bookings"])
+
+IdempotencyKey = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=255,
+        description=(
+            "A unique value, such as a UUID, that makes retrying safe: a request that repeats "
+            "the key gets the booking the first request made instead of booking again."
+        ),
+    ),
+]
 
 
 class BookingRequest(RequestSchema):
@@ -40,6 +53,9 @@ class BookingResponse(ResponseSchema):
     end: datetime
     status: BookingStatus
     price: int = Field(description="In minor units of the organisation's currency.")
+    hold_expires_at: datetime | None = Field(
+        description="When the hold on a booking that costs something runs out; null if free."
+    )
     created_at: datetime
 
     @classmethod
@@ -53,6 +69,7 @@ class BookingResponse(ResponseSchema):
             end=booking.period.end,
             status=booking.status,
             price=booking.price,
+            hold_expires_at=booking.hold_expires_at,
             created_at=booking.created_at,
         )
 
@@ -66,10 +83,12 @@ async def book_resource(
     session: DatabaseSession,
     request: Request,
     response: Response,
+    idempotency_key: IdempotencyKey = None,
 ) -> BookingResponse:
-    """Book the resource for the caller."""
+    """Book the resource for the caller. A booking that costs something is held for 10 minutes
+    and must be confirmed within them, or it expires and frees the slot."""
     booking = await service.book_resource(
-        session, actor_id, organisation_id, resource_id, body.to_period()
+        session, actor_id, organisation_id, resource_id, body.to_period(), idempotency_key
     )
     response.headers["Location"] = str(
         request.url_for("get_booking", organisation_id=organisation_id, booking_id=booking.id)
@@ -103,10 +122,21 @@ async def get_booking(
     return BookingResponse.from_booking(booking)
 
 
+@router.post("/bookings/{booking_id}/confirm")
+async def confirm_booking(
+    organisation_id: UUID, booking_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
+) -> BookingResponse:
+    """Confirm a held booking before its hold runs out. Until payments exist, this stands in for
+    paying. Confirming it again returns it unchanged."""
+    booking = await service.confirm_booking(session, actor_id, organisation_id, booking_id)
+    return BookingResponse.from_booking(booking)
+
+
 @router.post("/bookings/{booking_id}/cancel")
 async def cancel_booking(
     organisation_id: UUID, booking_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> BookingResponse:
-    """Cancel a booking that has not started. Cancelling it again returns it unchanged."""
+    """Cancel a booking that has not started. Cancelling a booking that is already cancelled or
+    expired returns it unchanged."""
     booking = await service.cancel_booking(session, actor_id, organisation_id, booking_id)
     return BookingResponse.from_booking(booking)

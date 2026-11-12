@@ -20,7 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, Range
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from holdfast.domain.bookings import BookingStatus
+from holdfast.domain.bookings import INACTIVE_STATUSES, BookingStatus
+from holdfast.domain.jobs import JobKind, JobStatus
 from holdfast.domain.memberships import Role
 from holdfast.domain.resources import ResourceKind
 
@@ -32,9 +33,10 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
-NO_OVERLAP_CONSTRAINT = "ex_bookings_no_overlap"
-ACTIVE_BOOKING = "status <> 'cancelled'"
-"""The rows of bookings that still hold their time. It mirrors INACTIVE_STATUSES."""
+ACTIVE_BOOKING = "status NOT IN ({})".format(
+    ", ".join(f"'{status}'" for status in sorted(INACTIVE_STATUSES))
+)
+"""The rows of bookings that still hold their time, written from INACTIVE_STATUSES."""
 
 
 class Base(DeclarativeBase):
@@ -144,12 +146,16 @@ class BookingRecord(EntityRecord):
         ),
         CheckConstraint("NOT isempty(period)", name="period_not_empty"),
         CheckConstraint("price >= 0", name="price_not_negative"),
+        CheckConstraint(
+            f"status <> '{BookingStatus.HELD}' OR hold_expires_at IS NOT NULL",
+            name="hold_has_expiry",
+        ),
         # Postgres rejects an active booking that overlaps another on the same resource, so
         # concurrent requests can never both win. Its index also serves availability.
         ExcludeConstraint(
             ("resource_id", "="),
             ("period", "&&"),
-            name=NO_OVERLAP_CONSTRAINT,
+            name="ex_bookings_no_overlap",
             using="gist",
             where=ACTIVE_BOOKING,
         ),
@@ -164,6 +170,14 @@ class BookingRecord(EntityRecord):
             text("upper(period)"),
             postgresql_where=text(ACTIVE_BOOKING),
         ),
+        # Finds the booking that a retried request already made. Each user has their own keys.
+        Index(
+            "uq_bookings_user_id_idempotency_key",
+            "user_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     organisation_id: Mapped[UUID]
@@ -172,3 +186,24 @@ class BookingRecord(EntityRecord):
     period: Mapped[Range[datetime]] = mapped_column(TSTZRANGE)
     status: Mapped[BookingStatus] = mapped_column(_string_enum(BookingStatus, "booking_status"))
     price: Mapped[int]
+    hold_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+
+
+class JobRecord(EntityRecord):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        # Workers look only at queued jobs, the most overdue first.
+        Index(
+            "ix_jobs_queued_run_at",
+            "run_at",
+            postgresql_where=text(f"status = '{JobStatus.QUEUED}'"),
+        ),
+    )
+
+    kind: Mapped[JobKind] = mapped_column(_string_enum(JobKind, "job_kind"))
+    payload: Mapped[dict[str, str]] = mapped_column(JSONB)
+    status: Mapped[JobStatus] = mapped_column(_string_enum(JobStatus, "job_status"))
+    attempts: Mapped[int]
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None]

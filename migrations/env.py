@@ -6,7 +6,7 @@ from alembic import context
 from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from holdfast.core.config import Settings
+from holdfast.core.config import DatabaseSettings
 from holdfast.repositories.records import Base
 
 
@@ -18,7 +18,9 @@ def run_migrations(connection: Connection) -> None:
 
 async def run_migrations_online() -> None:
     # Tests pass a throwaway database's URL in programmatically; the CLI reads DATABASE_URL.
-    database_url = context.config.attributes.get("database_url") or str(Settings().database_url)
+    database_url = context.config.attributes.get("database_url") or str(
+        DatabaseSettings().database_url
+    )
     engine = create_async_engine(database_url)
     async with engine.connect() as connection:
         await connection.run_sync(run_migrations)

@@ -4,6 +4,7 @@ import asyncio
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import status
@@ -47,6 +48,26 @@ async def test_only_one_of_many_simultaneous_requests_for_a_slot_succeeds(
     }
     conflicts = [response for response in responses if response.status_code == 409]
     assert all(response.json()["type"].endswith("#booking-conflict") for response in conflicts)
+    stored = await client.get(
+        f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings"
+    )
+    assert len(stored.json()["items"]) == 1
+
+
+async def test_simultaneous_retries_with_one_idempotency_key_make_one_booking(
+    client: AsyncClient, organisation: Json, resource: Json, book: Book
+) -> None:
+    """Most retries race the first request's INSERT rather than find its booking, and wait for
+    it on the key's unique index."""
+    await _open_pooled_connections(client)
+    key = {"Idempotency-Key": str(uuid4())}
+
+    responses = await asyncio.gather(
+        *(book("09:00", "10:00", headers=key) for _ in range(SIMULTANEOUS_REQUESTS))
+    )
+
+    assert {response.status_code for response in responses} == {status.HTTP_201_CREATED}
+    assert len({response.json()["id"] for response in responses}) == 1
     stored = await client.get(
         f"/organisations/{organisation['id']}/resources/{resource['id']}/bookings"
     )

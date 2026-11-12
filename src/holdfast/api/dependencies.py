@@ -8,7 +8,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from holdfast.core.config import Settings
+from holdfast.core.config import ApiSettings
 from holdfast.core.security import read_access_token
 from holdfast.domain.errors import AuthenticationError
 
@@ -22,13 +22,13 @@ async def _session(request: Request) -> AsyncIterator[AsyncSession]:
         yield session
 
 
-def _settings(request: Request) -> Settings:
-    settings: Settings = request.app.state.settings
+def _settings(request: Request) -> ApiSettings:
+    settings: ApiSettings = request.app.state.settings
     return settings
 
 
 DatabaseSession = Annotated[AsyncSession, Depends(_session)]
-AppSettings = Annotated[Settings, Depends(_settings)]
+AppSettings = Annotated[ApiSettings, Depends(_settings)]
 
 
 def _current_user_id(
