@@ -30,7 +30,3 @@ class InvalidBookingError(DomainError):
 
 class BookingConflictError(ConflictError):
     """The requested period overlaps an active booking of the same resource."""
-
-
-class IdempotencyKeyReusedError(DomainError):
-    """An idempotency key that already made one booking was sent with a different request."""

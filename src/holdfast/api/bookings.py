@@ -1,10 +1,10 @@
 """Bookings: claims on a resource for a period of time."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Self
+from typing import Self
 from uuid import UUID
 
-from fastapi import APIRouter, Header, Request, Response, status
+from fastapi import APIRouter, Request, Response, status
 from pydantic import AwareDatetime, Field, model_validator
 
 from holdfast.api.dependencies import CurrentUserId, DatabaseSession
@@ -15,16 +15,6 @@ from holdfast.domain.periods import Period
 from holdfast.services import bookings as service
 
 router = APIRouter(prefix="/organisations/{organisation_id}", tags=["bookings"])
-
-IdempotencyKey = Annotated[
-    str | None,
-    Header(
-        min_length=1,
-        max_length=255,
-        description="A value of your choosing, such as a UUID. Send the same one again when "
-        "you retry, and you get the booking the first attempt made instead of a second one.",
-    ),
-]
 
 
 class BookingRequest(RequestSchema):
@@ -50,10 +40,6 @@ class BookingResponse(ResponseSchema):
     end: datetime
     status: BookingStatus
     price: int = Field(description="In minor units of the organisation's currency.")
-    expires_at: datetime | None = Field(
-        description="When a hold lapses unless it is confirmed first; null for a booking that "
-        "was never held."
-    )
     created_at: datetime
 
     @classmethod
@@ -67,7 +53,6 @@ class BookingResponse(ResponseSchema):
             end=booking.period.end,
             status=booking.status,
             price=booking.price,
-            expires_at=booking.expires_at,
             created_at=booking.created_at,
         )
 
@@ -81,12 +66,10 @@ async def book_resource(
     session: DatabaseSession,
     request: Request,
     response: Response,
-    idempotency_key: IdempotencyKey = None,
 ) -> BookingResponse:
-    """Book the resource for the caller. A booking that costs money starts as a hold that
-    lapses unless it is confirmed in time; a free one is confirmed at once."""
+    """Book the resource for the caller."""
     booking = await service.book_resource(
-        session, actor_id, organisation_id, resource_id, body.to_period(), idempotency_key
+        session, actor_id, organisation_id, resource_id, body.to_period()
     )
     response.headers["Location"] = str(
         request.url_for("get_booking", organisation_id=organisation_id, booking_id=booking.id)
@@ -117,15 +100,6 @@ async def get_booking(
     organisation_id: UUID, booking_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
 ) -> BookingResponse:
     booking = await service.get_booking(session, actor_id, organisation_id, booking_id)
-    return BookingResponse.from_booking(booking)
-
-
-@router.post("/bookings/{booking_id}/confirm")
-async def confirm_booking(
-    organisation_id: UUID, booking_id: UUID, actor_id: CurrentUserId, session: DatabaseSession
-) -> BookingResponse:
-    """Confirm a hold before it lapses. Confirming it again returns it unchanged."""
-    booking = await service.confirm_booking(session, actor_id, organisation_id, booking_id)
     return BookingResponse.from_booking(booking)
 
 

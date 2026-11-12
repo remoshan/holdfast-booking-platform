@@ -1,5 +1,4 @@
-"""Bookings: the rules every new booking must satisfy, what a booking costs, and how a hold
-becomes a confirmed booking or lapses."""
+"""Bookings, the rules every new booking must satisfy, and what a booking costs."""
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -12,18 +11,14 @@ from holdfast.domain.periods import GRID_MINUTES, Period, is_on_grid
 
 BOOKING_HORIZON_DAYS = 30
 """Bookings can start at most this many days after today, in the location's calendar."""
-HOLD_DURATION = timedelta(minutes=10)
-"""How long a booking that costs money keeps its slot before it has to be confirmed."""
 
 
 class BookingStatus(StrEnum):
-    HELD = auto()
     CONFIRMED = auto()
     CANCELLED = auto()
-    EXPIRED = auto()
 
 
-INACTIVE_STATUSES = frozenset({BookingStatus.CANCELLED, BookingStatus.EXPIRED})
+INACTIVE_STATUSES = frozenset({BookingStatus.CANCELLED})
 """Statuses whose bookings no longer hold their time. Every other status keeps the slot taken,
 so a status added later blocks overlapping bookings until it is deliberately listed here and in
 the database's exclusion constraint."""
@@ -39,41 +34,15 @@ class Booking:
     status: BookingStatus
     price: int
     """What the booking costs, in minor units of the organisation's currency."""
-    expires_at: datetime | None
-    """When a hold lapses unless it is confirmed first. None for a booking that was never held."""
     created_at: datetime
 
-    def confirm(self, now: datetime) -> Booking:
-        """Confirm a hold that has not lapsed. Confirming twice changes nothing."""
-        if self.status is BookingStatus.CONFIRMED:
-            return self
-        if self.status is not BookingStatus.HELD or self._has_lapsed(now):
-            raise ConflictError("Only a hold that has not expired can be confirmed.")
-        return replace(self, status=BookingStatus.CONFIRMED)
-
     def cancel(self, now: datetime) -> Booking:
-        """Cancel a booking that has not started yet. A booking that is already cancelled or
-        expired is returned unchanged."""
-        if self.status in INACTIVE_STATUSES:
+        """Cancel a booking that has not started yet. Cancelling twice changes nothing."""
+        if self.status is BookingStatus.CANCELLED:
             return self
         if self.period.start <= now:
             raise ConflictError("A booking that has already started cannot be cancelled.")
         return replace(self, status=BookingStatus.CANCELLED)
-
-    def expire(self, now: datetime) -> Booking:
-        """Expire a hold whose time has run out. Any other booking is returned unchanged."""
-        if self.status is BookingStatus.HELD and self._has_lapsed(now):
-            return replace(self, status=BookingStatus.EXPIRED)
-        return self
-
-    def _has_lapsed(self, now: datetime) -> bool:
-        return self.expires_at is not None and self.expires_at <= now
-
-
-def hold_expiry(price: int, now: datetime) -> datetime | None:
-    """When a new booking's hold lapses. A booking that costs money is held until it is
-    confirmed; a free one has nothing to wait for, so it needs no hold."""
-    return now + HOLD_DURATION if price > 0 else None
 
 
 def last_bookable_day(location: Location, now: datetime) -> date:

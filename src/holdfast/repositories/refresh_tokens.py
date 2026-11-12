@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from holdfast.domain.users import RefreshTokenFamily
@@ -58,8 +58,3 @@ async def revoke_family_of(session: AsyncSession, token_hash: str, now: datetime
         .where(RefreshTokenRecord.family_id == family_id, RefreshTokenRecord.revoked_at.is_(None))
         .values(revoked_at=now)
     )
-
-
-async def remove_expired(session: AsyncSession, now: datetime) -> None:
-    """Delete the tokens that have expired, which can never be used again."""
-    await session.execute(delete(RefreshTokenRecord).where(RefreshTokenRecord.expires_at <= now))

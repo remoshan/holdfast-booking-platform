@@ -70,13 +70,6 @@ async def log_out(session: AsyncSession, refresh_token: str) -> None:
         )
 
 
-async def remove_expired_refresh_tokens(session: AsyncSession) -> None:
-    """Delete the refresh tokens that have expired. The worker does this regularly, so the
-    table holds only tokens that could still be used."""
-    async with session.begin():
-        await refresh_tokens.remove_expired(session, datetime.now(UTC))
-
-
 async def _issue_tokens(
     session: AsyncSession, user_id: UUID, family_id: UUID, secret: str, now: datetime
 ) -> IssuedTokens:

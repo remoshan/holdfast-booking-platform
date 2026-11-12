@@ -18,11 +18,11 @@ from holdfast.api import (
     users,
 )
 from holdfast.api.errors import PROBLEM_HANDLERS, PROBLEM_RESPONSES
-from holdfast.core.config import ApiSettings
+from holdfast.core.config import Settings
 
 
-def create_app(settings: ApiSettings | None = None) -> FastAPI:
-    settings = settings or ApiSettings()
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

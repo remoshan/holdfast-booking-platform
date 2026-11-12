@@ -1,27 +1,33 @@
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
-from holdfast.domain.bookings import (
-    HOLD_DURATION,
-    Booking,
-    BookingStatus,
-    check_booking_rules,
-    hold_expiry,
-    price_for,
-)
+from holdfast.domain.bookings import Booking, BookingStatus, check_booking_rules, price_for
 from holdfast.domain.errors import ConflictError, InvalidBookingError
 from holdfast.domain.locations import Location
 from holdfast.domain.periods import Period
 
 type LocalPeriod = Callable[[date, str, str], Period]
-type NewBooking = Callable[..., Booking]
 
 MONDAY = date(2026, 11, 2)
 TUESDAY = date(2026, 11, 3)
 SUNDAY = date(2026, 11, 8)
 NOW = datetime(2026, 11, 2, 7, 0, tzinfo=UTC)  # Monday 08:00 in Amsterdam
+
+
+def _booking(period: Period) -> Booking:
+    return Booking(
+        id=uuid4(),
+        organisation_id=uuid4(),
+        resource_id=uuid4(),
+        user_id=uuid4(),
+        period=period,
+        status=BookingStatus.CONFIRMED,
+        price=0,
+        created_at=NOW,
+    )
 
 
 def test_a_booking_within_opening_hours_is_accepted(
@@ -84,90 +90,20 @@ def test_price_counts_the_hours_that_pass_across_a_daylight_saving_change(
     assert price_for(local_period(date(2026, 10, 25), "00:00", "04:00"), 1000) == 5000
 
 
-def test_cancelling_a_future_booking(new_booking: NewBooking, local_period: LocalPeriod) -> None:
-    booking = new_booking(local_period(TUESDAY, "09:00", "10:00"))
+def test_cancelling_a_future_booking(local_period: LocalPeriod) -> None:
+    booking = _booking(local_period(TUESDAY, "09:00", "10:00"))
 
     assert booking.cancel(NOW).status is BookingStatus.CANCELLED
 
 
-def test_cancelling_twice_changes_nothing(
-    new_booking: NewBooking, local_period: LocalPeriod
-) -> None:
-    cancelled = new_booking(local_period(TUESDAY, "09:00", "10:00")).cancel(NOW)
+def test_cancelling_twice_changes_nothing(local_period: LocalPeriod) -> None:
+    cancelled = _booking(local_period(TUESDAY, "09:00", "10:00")).cancel(NOW)
 
     assert cancelled.cancel(NOW) == cancelled
 
 
-def test_a_booking_that_has_started_cannot_be_cancelled(
-    new_booking: NewBooking, local_period: LocalPeriod
-) -> None:
-    booking = new_booking(local_period(MONDAY, "08:00", "09:00"))
+def test_a_booking_that_has_started_cannot_be_cancelled(local_period: LocalPeriod) -> None:
+    booking = _booking(local_period(MONDAY, "08:00", "09:00"))
 
     with pytest.raises(ConflictError, match="already started"):
         booking.cancel(NOW)
-
-
-def test_a_booking_that_costs_money_is_held_for_ten_minutes() -> None:
-    assert hold_expiry(2000, NOW) == NOW + timedelta(minutes=10)
-
-
-def test_a_free_booking_needs_no_hold() -> None:
-    assert hold_expiry(0, NOW) is None
-
-
-@pytest.fixture
-def hold(new_booking: NewBooking, local_period: LocalPeriod) -> Booking:
-    """A hold made at NOW for Tuesday morning."""
-    return new_booking(
-        local_period(TUESDAY, "09:00", "10:00"),
-        status=BookingStatus.HELD,
-        price=2000,
-        expires_at=NOW + HOLD_DURATION,
-    )
-
-
-def test_a_hold_can_be_confirmed_until_it_lapses(hold: Booking) -> None:
-    last_moment = NOW + HOLD_DURATION - timedelta(seconds=1)
-
-    assert hold.confirm(last_moment).status is BookingStatus.CONFIRMED
-
-
-def test_confirming_twice_changes_nothing(hold: Booking) -> None:
-    confirmed = hold.confirm(NOW)
-
-    assert confirmed.confirm(NOW + HOLD_DURATION) == confirmed
-
-
-def test_a_lapsed_hold_cannot_be_confirmed(hold: Booking) -> None:
-    with pytest.raises(ConflictError, match="not expired"):
-        hold.confirm(NOW + HOLD_DURATION)
-
-
-@pytest.mark.parametrize("status", [BookingStatus.CANCELLED, BookingStatus.EXPIRED])
-def test_a_booking_that_gave_up_its_slot_cannot_be_confirmed(
-    new_booking: NewBooking, local_period: LocalPeriod, status: BookingStatus
-) -> None:
-    booking = new_booking(local_period(TUESDAY, "09:00", "10:00"), status=status)
-
-    with pytest.raises(ConflictError):
-        booking.confirm(NOW)
-
-
-def test_a_hold_expires_once_its_time_has_run_out(hold: Booking) -> None:
-    assert hold.expire(NOW + HOLD_DURATION).status is BookingStatus.EXPIRED
-
-
-def test_a_hold_does_not_expire_early(hold: Booking) -> None:
-    assert hold.expire(NOW + HOLD_DURATION - timedelta(seconds=1)) == hold
-
-
-def test_a_confirmed_booking_never_expires(hold: Booking) -> None:
-    confirmed = hold.confirm(NOW)
-
-    assert confirmed.expire(NOW + timedelta(days=1)) == confirmed
-
-
-def test_cancelling_an_expired_hold_changes_nothing(hold: Booking) -> None:
-    expired = hold.expire(NOW + HOLD_DURATION)
-
-    assert expired.cancel(NOW + HOLD_DURATION) == expired

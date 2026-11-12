@@ -16,7 +16,6 @@ from holdfast.domain.errors import (
     BookingConflictError,
     ConflictError,
     DomainError,
-    IdempotencyKeyReusedError,
     InvalidBookingError,
     NotFoundError,
     PermissionDeniedError,
@@ -37,9 +36,6 @@ class ProblemType:
 VALIDATION_ERROR = ProblemType(f"{_DOCUMENTATION_URL}validation-error", "Invalid request")
 INVALID_BOOKING = ProblemType(f"{_DOCUMENTATION_URL}invalid-booking", "Booking rule broken")
 BOOKING_CONFLICT = ProblemType(f"{_DOCUMENTATION_URL}booking-conflict", "Resource already booked")
-IDEMPOTENCY_KEY_REUSED = ProblemType(
-    f"{_DOCUMENTATION_URL}idempotency-key-reused", "Idempotency key reused"
-)
 
 # None means "about:blank": the HTTP status alone describes the problem.
 _DOMAIN_PROBLEMS: Mapping[type[DomainError], tuple[int, ProblemType | None]] = {
@@ -49,7 +45,6 @@ _DOMAIN_PROBLEMS: Mapping[type[DomainError], tuple[int, ProblemType | None]] = {
     ConflictError: (status.HTTP_409_CONFLICT, None),
     BookingConflictError: (status.HTTP_409_CONFLICT, BOOKING_CONFLICT),
     InvalidBookingError: (status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_BOOKING),
-    IdempotencyKeyReusedError: (status.HTTP_422_UNPROCESSABLE_CONTENT, IDEMPOTENCY_KEY_REUSED),
 }
 
 type ProblemHandler = Callable[[Request, Any], Coroutine[Any, Any, Response]]

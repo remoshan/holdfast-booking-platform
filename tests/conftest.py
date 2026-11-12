@@ -18,7 +18,7 @@ from sqlalchemy import text
 from testcontainers.community.postgres import PostgresContainer
 
 from holdfast.core import security
-from holdfast.core.config import ApiSettings
+from holdfast.core.config import Settings
 from holdfast.main import create_app
 from holdfast.repositories.records import Base
 
@@ -61,7 +61,7 @@ def _client(app: FastAPI, headers: dict[str, str] | None = None) -> AsyncClient:
 
 @pytest.fixture
 async def app(database_url: str) -> AsyncIterator[FastAPI]:
-    app = create_app(ApiSettings(database_url=database_url, jwt_secret=JWT_SECRET))
+    app = create_app(Settings(database_url=database_url, jwt_secret=JWT_SECRET))
     async with app.router.lifespan_context(app):
         yield app
         async with app.state.engine.begin() as connection:
@@ -78,7 +78,7 @@ async def anonymous_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def client_without_database() -> AsyncIterator[AsyncClient]:
     # Nothing listens on port 1, so every connection attempt fails.
     unreachable = "postgresql+asyncpg://holdfast:holdfast@127.0.0.1:1/holdfast"
-    app = create_app(ApiSettings(database_url=unreachable, jwt_secret=JWT_SECRET))
+    app = create_app(Settings(database_url=unreachable, jwt_secret=JWT_SECRET))
     async with app.router.lifespan_context(app), _client(app) as client:
         yield client
 
