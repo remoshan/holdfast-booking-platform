@@ -4,10 +4,12 @@ import asyncio
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import formatdate
 
 SMTP_TIMEOUT_SECONDS = 10
-"""Applies to connecting and to every reply, so a mail server that stops answering fails the
-attempt instead of holding the job forever."""
+"""Applies to connecting and to each reply separately, so a mail server that stops answering
+fails the attempt. A whole send waits for about eight replies, so it can take several times
+longer; the worker's idle-in-transaction limit allows for that."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +24,8 @@ class Mailer:
         message["From"] = self.sender
         message["To"] = recipient
         message["Subject"] = subject
+        # RFC 5322 requires a date, and neither EmailMessage nor smtplib adds one.
+        message["Date"] = formatdate(usegmt=True)
         message["Message-ID"] = message_id
         message.set_content(body)
         await asyncio.to_thread(self._send, message)

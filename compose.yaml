@@ -57,6 +57,9 @@ services:
   worker:
     <<: *holdfast-image
     command: ["python", "-m", "holdfast.worker"]
+    # Longer than the slowest job, a reminder to a mail server that takes SMTP_TIMEOUT_SECONDS
+    # over every reply, so that `docker compose stop` lets the job in hand finish.
+    stop_grace_period: 2m
     environment:
       <<: *database-url
       SMTP_HOST: mailpit

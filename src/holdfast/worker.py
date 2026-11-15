@@ -20,8 +20,12 @@ POLL_INTERVAL_SECONDS = 1
 PURGE_INTERVAL = timedelta(days=1)
 # A worker holds its job's lock in an open transaction. If its machine vanishes without closing
 # the connection, Postgres ends the session after this long, which frees the job. It must
-# outlast any job: SMTP_TIMEOUT_SECONDS bounds the slowest, a reminder.
-IDLE_IN_TRANSACTION_TIMEOUT = "1min"
+# outlast the slowest job: a reminder waits up to SMTP_TIMEOUT_SECONDS for each of about eight
+# replies from the mail server, so a whole send can take well over a minute.
+IDLE_IN_TRANSACTION_TIMEOUT = "5min"
+# A job that waits longer than this for a row lock fails, and is retried later, instead of
+# holding the worker for as long as someone else holds the lock.
+LOCK_TIMEOUT = "10s"
 
 # Not __name__, which is "__main__" when the worker runs with `python -m`.
 logger = logging.getLogger("holdfast.worker")
@@ -31,11 +35,14 @@ async def run_worker(settings: WorkerSettings, stopping: asyncio.Event) -> None:
     engine = create_async_engine(
         str(settings.database_url),
         connect_args={
-            "server_settings": {"idle_in_transaction_session_timeout": IDLE_IN_TRANSACTION_TIMEOUT}
+            "server_settings": {
+                "idle_in_transaction_session_timeout": IDLE_IN_TRANSACTION_TIMEOUT,
+                "lock_timeout": LOCK_TIMEOUT,
+            }
         },
     )
     sessions = async_sessionmaker(engine)
-    mailer = Mailer(settings.smtp_host, settings.smtp_port, str(settings.mail_from))
+    mailer = Mailer(settings.smtp_host, settings.smtp_port, settings.sender)
     next_purge = datetime.now(UTC)
     logger.info("The worker is running")
     try:

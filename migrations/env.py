@@ -11,7 +11,12 @@ from holdfast.repositories.records import Base
 
 
 def run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=Base.metadata)
+    # Each migration commits together with its own revision stamp, as Alembic advises when some
+    # migrations work outside a transaction. In one shared transaction, such a migration's stamp
+    # would be written with the next migration and lost if that one failed.
+    context.configure(
+        connection=connection, target_metadata=Base.metadata, transaction_per_migration=True
+    )
     with context.begin_transaction():
         context.run_migrations()
 

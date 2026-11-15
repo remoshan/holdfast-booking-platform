@@ -1,6 +1,8 @@
 """Settings for each process, read from environment variables. Each process gets only what it
 needs, so the worker never holds the key that signs access tokens."""
 
+from email.headerregistry import Address
+
 from pydantic import Field, NameEmail, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,3 +27,10 @@ class WorkerSettings(DatabaseSettings):
     smtp_port: int = Field(ge=1, le=65535)
     mail_from: NameEmail
     """Sender of every email, e.g. Holdfast <reminders@example.com>."""
+
+    @property
+    def sender(self) -> str:
+        """MAIL_FROM as a From header. str() of a NameEmail drops the quotes that a display name
+        with a comma or a colon needs, which would split it into two addresses, and formataddr
+        rejects the internationalised addresses that NameEmail accepts."""
+        return str(Address(display_name=self.mail_from.name, addr_spec=self.mail_from.email))

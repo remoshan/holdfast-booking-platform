@@ -15,7 +15,7 @@ from alembic.config import Config
 from argon2 import PasswordHasher, profiles
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
-from sqlalchemy import text
+from sqlalchemy import select, text
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import HttpWaitStrategy
@@ -24,7 +24,7 @@ from holdfast.core import security
 from holdfast.core.config import ApiSettings
 from holdfast.core.mail import Mailer
 from holdfast.main import create_app
-from holdfast.repositories.records import Base
+from holdfast.repositories.records import Base, JobRecord
 
 POSTGRES_IMAGE = "postgres:18-alpine"
 MAILPIT_IMAGE = "axllent/mailpit:v1.33"
@@ -55,10 +55,21 @@ def fast_password_hashing(monkeypatch: pytest.MonkeyPatch) -> None:
 def database_url() -> Iterator[str]:
     with PostgresContainer(POSTGRES_IMAGE, driver="asyncpg") as postgres:
         url = postgres.get_connection_url()
-        alembic_config = Config(toml_file=str(PYPROJECT_PATH))
-        alembic_config.attributes["database_url"] = url
-        command.upgrade(alembic_config, "head")
+        command.upgrade(_alembic_config(url), "head")
         yield url
+
+
+@pytest.fixture
+def alembic_config(database_url: str) -> Config:
+    """Runs migrations against the test database. Alembic's env.py starts an event loop of its
+    own, so async tests call its commands through asyncio.to_thread."""
+    return _alembic_config(database_url)
+
+
+def _alembic_config(database_url: str) -> Config:
+    config = Config(toml_file=str(PYPROJECT_PATH))
+    config.attributes["database_url"] = database_url
+    return config
 
 
 @pytest.fixture(scope="session")
@@ -106,6 +117,17 @@ async def app(database_url: str) -> AsyncIterator[FastAPI]:
         yield app
         async with app.state.engine.begin() as connection:
             await connection.execute(EMPTY_ALL_TABLES)
+
+
+@pytest.fixture
+def stored_jobs(app: FastAPI) -> Callable[[], Awaitable[list[JobRecord]]]:
+    """Every job in the table, dead ones included, the earliest due first."""
+
+    async def stored_jobs() -> list[JobRecord]:
+        async with app.state.sessions() as session:
+            return list(await session.scalars(select(JobRecord).order_by(JobRecord.run_at)))
+
+    return stored_jobs
 
 
 @pytest.fixture

@@ -1,8 +1,9 @@
 """Background jobs: queued in the transaction of the change that needs them, run by the worker.
 
 A job runs inside the transaction that claimed it, and its writes commit together with its
-removal from the queue. However the worker stops, a job's work is never lost and never applied
-twice; only an email can go out twice, if the worker dies between sending it and committing.
+removal from the queue. However the worker stops, a job's database work is never lost and never
+applied twice; only an email can go out twice, if the worker dies after the mail server accepted
+it but before the job's transaction commits.
 """
 
 import logging
@@ -16,7 +17,7 @@ from holdfast.core.mail import Mailer
 from holdfast.domain.bookings import Booking
 from holdfast.domain.jobs import Job, JobKind, JobStatus
 from holdfast.domain.reminders import compose_reminder, needs_reminder, reminder_time
-from holdfast.repositories import bookings, jobs, locations, resources, users
+from holdfast.repositories import bookings, jobs, locations, memberships, resources, users
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,10 @@ async def _send_reminder(
 ) -> None:
     booking = await bookings.get(session, organisation_id, booking_id)
     if not needs_reminder(booking, now):
+        return
+    # Someone who has left the organisation can no longer see or cancel the booking, and
+    # must not be sent its current details.
+    if await memberships.find(session, organisation_id, booking.user_id) is None:
         return
     resource = await resources.get(session, organisation_id, booking.resource_id)
     location = await locations.get(session, organisation_id, resource.location_id)
