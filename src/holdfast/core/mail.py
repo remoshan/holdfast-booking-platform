@@ -2,14 +2,16 @@
 
 import asyncio
 import smtplib
+from contextlib import suppress
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formatdate
 
 SMTP_TIMEOUT_SECONDS = 10
 """Applies to connecting and to each reply separately, so a mail server that stops answering
-fails the attempt. A whole send waits for about eight replies, so it can take several times
-longer; the worker's idle-in-transaction limit is derived from this value to allow for that."""
+before it accepts the email fails the attempt. A whole send waits for about eight replies, so it
+can take several times longer; the worker's idle-in-transaction limit is derived from this value
+to allow for that."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,5 +33,14 @@ class Mailer:
         await asyncio.to_thread(self._send, message)
 
     def _send(self, message: EmailMessage) -> None:
-        with smtplib.SMTP(self.host, self.port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
+        smtp = smtplib.SMTP(self.host, self.port, timeout=SMTP_TIMEOUT_SECONDS)
+        try:
             smtp.send_message(message)
+            # The server has accepted the email, so nothing after this may fail the attempt, or
+            # the job would send the email again. That rules out a `with` block, whose exit
+            # raises when QUIT gets any reply but 221. quit() ignores the reply, and suppress()
+            # covers a server that hangs up or stops answering; smtplib's errors are OSErrors.
+            with suppress(OSError):
+                smtp.quit()
+        finally:
+            smtp.close()
