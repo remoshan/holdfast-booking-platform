@@ -8,8 +8,10 @@ from fastapi import FastAPI, status
 from httpx import AsyncClient, Response
 
 from holdfast.domain.bookings import HOLD_DURATION, Booking
+from holdfast.domain.jobs import JobKind
 from holdfast.domain.periods import Period
 from holdfast.repositories import bookings
+from holdfast.repositories.records import JobRecord
 
 pytestmark = pytest.mark.anyio
 
@@ -204,8 +206,11 @@ async def test_confirm_a_held_booking(client: AsyncClient, organisation: Json, b
     assert (await client.get(path)).json()["status"] == "confirmed"
 
 
-async def test_confirming_twice_returns_the_confirmed_booking(
-    client: AsyncClient, organisation: Json, book: Book
+async def test_confirming_twice_returns_the_confirmed_booking_and_queues_one_reminder(
+    client: AsyncClient,
+    organisation: Json,
+    book: Book,
+    stored_jobs: Callable[[], Awaitable[list[JobRecord]]],
 ) -> None:
     booking = (await book("09:00", "10:00")).json()
     confirm_path = f"/organisations/{organisation['id']}/bookings/{booking['id']}/confirm"
@@ -215,6 +220,10 @@ async def test_confirming_twice_returns_the_confirmed_booking(
 
     assert second.status_code == status.HTTP_200_OK
     assert second.json() == first.json()
+    assert sorted(job.kind for job in await stored_jobs()) == [
+        JobKind.EXPIRE_HOLD,
+        JobKind.SEND_REMINDER,
+    ]
 
 
 async def test_a_cancelled_booking_cannot_be_confirmed(

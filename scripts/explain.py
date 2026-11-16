@@ -4,7 +4,9 @@ them.
 Every query is the exact SQL the application sends: a repository function runs and SQLAlchemy's
 statements are captured on their way to Postgres. "Before" drops those indexes inside a
 transaction that is rolled back, so both sides run on the same data and the database is left as
-it was. Each side reports the median of several warm runs. Run it on seeded data:
+it was. Each side reports the median of several warm runs. Run it on seeded data, with the
+worker stopped: its jobs would compete with the measurements, and could deadlock with the index
+drops.
 
     uv run python scripts/explain.py [--database-url URL]
 """

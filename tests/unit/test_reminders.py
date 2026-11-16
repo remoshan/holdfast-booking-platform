@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from email.message import EmailMessage
 from uuid import uuid4
 
 import pytest
@@ -70,3 +71,18 @@ def test_the_reminder_shows_the_booking_on_the_locations_clock(
     assert "Central, Damrak 1, Amsterdam" in reminder.body
     assert "Tuesday 03 November 2026, 09:00 to 10:30 (Europe/Amsterdam time)" in reminder.body
     assert reminder.message_id == f"<reminder.{booking.id}@holdfast>"
+
+
+@pytest.mark.parametrize(
+    "name", ["Room 4\nSecond floor", "Room 4\u2028Second floor", " Room 4 \r\n\tSecond floor "]
+)
+def test_a_name_with_line_breaks_stays_on_one_line_in_the_subject(
+    amsterdam_location: Location, local_period: LocalPeriod, name: str
+) -> None:
+    booking = _booking(local_period(TUESDAY, "09:00", "10:30"))
+
+    reminder = compose_reminder(booking, name, amsterdam_location)
+
+    message = EmailMessage()
+    message["Subject"] = reminder.subject  # refuses a value with a line break
+    assert reminder.subject.startswith("Reminder: Room 4 Second floor, ")

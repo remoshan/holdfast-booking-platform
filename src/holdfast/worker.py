@@ -12,16 +12,17 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from holdfast.core.config import WorkerSettings
-from holdfast.core.mail import Mailer
+from holdfast.core.mail import SMTP_TIMEOUT_SECONDS, Mailer
 from holdfast.services import auth
 from holdfast.services.jobs import run_next_job
 
 POLL_INTERVAL_SECONDS = 1
 PURGE_INTERVAL = timedelta(days=1)
 # A worker holds its job's lock in an open transaction. If its machine vanishes without closing
-# the connection, Postgres ends the session after this long, which frees the job. It must
-# outlast any job: SMTP_TIMEOUT_SECONDS bounds the slowest, a reminder.
-IDLE_IN_TRANSACTION_TIMEOUT = "1min"
+# the connection, Postgres ends the session after this long, which frees the job. The limit
+# must outlast the slowest job, a reminder sent through a slow mail server. A send waits up to
+# SMTP_TIMEOUT_SECONDS for each of about eight replies, so the limit is thirty times that.
+IDLE_IN_TRANSACTION_TIMEOUT = f"{30 * SMTP_TIMEOUT_SECONDS}s"
 
 # Not __name__, which is "__main__" when the worker runs with `python -m`.
 logger = logging.getLogger("holdfast.worker")
@@ -35,7 +36,7 @@ async def run_worker(settings: WorkerSettings, stopping: asyncio.Event) -> None:
         },
     )
     sessions = async_sessionmaker(engine)
-    mailer = Mailer(settings.smtp_host, settings.smtp_port, str(settings.mail_from))
+    mailer = Mailer(settings.smtp_host, settings.smtp_port, settings.sender)
     next_purge = datetime.now(UTC)
     logger.info("The worker is running")
     try:

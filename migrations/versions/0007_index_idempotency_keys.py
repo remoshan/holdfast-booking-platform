@@ -17,9 +17,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Built concurrently, so bookings keep flowing meanwhile (ADR-0011). If a build fails, drop
-    # the invalid index it leaves and rerun.
+    # Built concurrently, so bookings keep flowing meanwhile (ADR-0011). Such statements run
+    # outside a transaction, so a failure partway leaves work behind, such as an invalid,
+    # half-built index. Each step first drops what a failed run may have left, so running the
+    # migration again recovers.
     with op.get_context().autocommit_block():
+        _drop_if_exists("uq_bookings_user_id_idempotency_key")
         op.create_index(
             "uq_bookings_user_id_idempotency_key",
             "bookings",
@@ -34,16 +37,13 @@ def upgrade() -> None:
 def downgrade() -> None:
     with op.get_context().autocommit_block():
         _rebuild_active_user_index(where="status <> 'cancelled'")
-        op.drop_index(
-            "uq_bookings_user_id_idempotency_key",
-            table_name="bookings",
-            postgresql_concurrently=True,
-        )
+        _drop_if_exists("uq_bookings_user_id_idempotency_key")
 
 
 def _rebuild_active_user_index(where: str) -> None:
     """Rebuild ix_bookings_active_user_id_end with a new condition. The new index is built next to
     the old one and takes its name once the old one is gone, so the query never goes without."""
+    _drop_if_exists("ix_bookings_active_user_id_end_rebuilt")
     op.create_index(
         "ix_bookings_active_user_id_end_rebuilt",
         "bookings",
@@ -51,10 +51,12 @@ def _rebuild_active_user_index(where: str) -> None:
         postgresql_where=sa.text(where),
         postgresql_concurrently=True,
     )
-    op.drop_index(
-        "ix_bookings_active_user_id_end", table_name="bookings", postgresql_concurrently=True
-    )
+    _drop_if_exists("ix_bookings_active_user_id_end")
     op.execute(
         "ALTER INDEX ix_bookings_active_user_id_end_rebuilt"
         " RENAME TO ix_bookings_active_user_id_end"
     )
+
+
+def _drop_if_exists(name: str) -> None:
+    op.drop_index(name, table_name="bookings", postgresql_concurrently=True, if_exists=True)

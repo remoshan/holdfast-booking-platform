@@ -34,6 +34,8 @@ def compose_reminder(booking: Booking, resource_name: str, location: Location) -
     """The reminder for a booking, with its times on the location's clock."""
     start = booking.period.start.astimezone(location.timezone)
     end = booking.period.end.astimezone(location.timezone)
+    # A name may contain line breaks, but an email header must stay on one line.
+    resource_name = " ".join(resource_name.split())
     body = (
         "Hello,\n\n"
         "This is a reminder of your booking:\n\n"
