@@ -226,10 +226,5 @@ async def test_a_migration_outside_a_transaction_keeps_its_stamp_when_the_next_o
         async with engine.connect() as connection:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
     finally:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text("ALTER TABLE jobs DROP CONSTRAINT IF EXISTS refuses_every_job")
-            )
         await engine.dispose()
-        await asyncio.to_thread(command.upgrade, alembic_config, "head")
     assert revision == "0007"

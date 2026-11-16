@@ -2,6 +2,7 @@
 emptied after every test, signed-in clients, factories for the entities most tests need, and a
 mail catcher for the tests that send email."""
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import date, datetime, time, timedelta
 from itertools import count
@@ -16,6 +17,7 @@ from argon2 import PasswordHasher, profiles
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import HttpWaitStrategy
@@ -28,7 +30,8 @@ from holdfast.repositories.records import Base, JobRecord
 
 POSTGRES_IMAGE = "postgres:18-alpine"
 MAILPIT_IMAGE = "axllent/mailpit:v1.33"
-MAIL_FROM = "Holdfast <reminders@example.com>"
+# A display name with a comma must be quoted, or the From header splits into two addresses.
+MAIL_FROM = '"Holdfast, Inc." <reminders@example.com>'
 PYPROJECT_PATH = Path(__file__).parents[1] / "pyproject.toml"
 JWT_SECRET = "a-secret-used-only-by-the-test-suite"
 PASSWORD = "correct horse battery staple"
@@ -60,10 +63,21 @@ def database_url() -> Iterator[str]:
 
 
 @pytest.fixture
-def alembic_config(database_url: str) -> Config:
+async def alembic_config(database_url: str) -> AsyncIterator[Config]:
     """Runs migrations against the test database. Alembic's env.py starts an event loop of its
-    own, so async tests call its commands through asyncio.to_thread."""
-    return _alembic_config(database_url)
+    own, so async tests call its commands through asyncio.to_thread. A test that fails while
+    the database is at another revision would break every test after it, so the schema is
+    rebuilt from scratch afterwards."""
+    config = _alembic_config(database_url)
+    yield config
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP SCHEMA public CASCADE"))
+            await connection.execute(text("CREATE SCHEMA public"))
+    finally:
+        await engine.dispose()
+    await asyncio.to_thread(command.upgrade, config, "head")
 
 
 def _alembic_config(database_url: str) -> Config:

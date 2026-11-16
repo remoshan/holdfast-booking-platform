@@ -84,7 +84,10 @@ async def test_killing_a_worker_mid_job_loses_nothing_and_duplicates_nothing(
     async with _worker(database_url, mailer, mailer.host, mailer.port):
         await _eventually(lambda: _no_jobs_left(app))
 
-    assert [email["MessageID"] for email in await inbox()] == [f"reminder.{booking['id']}@holdfast"]
+    emails = await inbox()
+    assert [email["MessageID"] for email in emails] == [f"reminder.{booking['id']}@holdfast"]
+    # The worker read its sender from MAIL_FROM and kept the quotes the name needs.
+    assert emails[0]["From"] == {"Name": "Holdfast, Inc.", "Address": "reminders@example.com"}
 
 
 def _stall(
