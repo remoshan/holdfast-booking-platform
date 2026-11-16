@@ -9,7 +9,7 @@ from email.utils import formatdate
 SMTP_TIMEOUT_SECONDS = 10
 """Applies to connecting and to each reply separately, so a mail server that stops answering
 fails the attempt. A whole send waits for about eight replies, so it can take several times
-longer; the worker's idle-in-transaction limit allows for that."""
+longer; the worker's idle-in-transaction limit is derived from this value to allow for that."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,20 +12,17 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from holdfast.core.config import WorkerSettings
-from holdfast.core.mail import Mailer
+from holdfast.core.mail import SMTP_TIMEOUT_SECONDS, Mailer
 from holdfast.services import auth
 from holdfast.services.jobs import run_next_job
 
 POLL_INTERVAL_SECONDS = 1
 PURGE_INTERVAL = timedelta(days=1)
 # A worker holds its job's lock in an open transaction. If its machine vanishes without closing
-# the connection, Postgres ends the session after this long, which frees the job. It must
-# outlast the slowest job: a reminder waits up to SMTP_TIMEOUT_SECONDS for each of about eight
-# replies from the mail server, so a whole send can take well over a minute.
-IDLE_IN_TRANSACTION_TIMEOUT = "5min"
-# A job that waits longer than this for a row lock fails, and is retried later, instead of
-# holding the worker for as long as someone else holds the lock.
-LOCK_TIMEOUT = "10s"
+# the connection, Postgres ends the session after this long, which frees the job. The limit
+# must outlast the slowest job, a reminder sent through a slow mail server. A send waits up to
+# SMTP_TIMEOUT_SECONDS for each of about eight replies, so the limit is thirty times that.
+IDLE_IN_TRANSACTION_TIMEOUT = f"{30 * SMTP_TIMEOUT_SECONDS}s"
 
 # Not __name__, which is "__main__" when the worker runs with `python -m`.
 logger = logging.getLogger("holdfast.worker")
@@ -35,10 +32,7 @@ async def run_worker(settings: WorkerSettings, stopping: asyncio.Event) -> None:
     engine = create_async_engine(
         str(settings.database_url),
         connect_args={
-            "server_settings": {
-                "idle_in_transaction_session_timeout": IDLE_IN_TRANSACTION_TIMEOUT,
-                "lock_timeout": LOCK_TIMEOUT,
-            }
+            "server_settings": {"idle_in_transaction_session_timeout": IDLE_IN_TRANSACTION_TIMEOUT}
         },
     )
     sessions = async_sessionmaker(engine)

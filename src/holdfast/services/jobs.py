@@ -2,8 +2,8 @@
 
 A job runs inside the transaction that claimed it, and its writes commit together with its
 removal from the queue. However the worker stops, a job's database work is never lost and never
-applied twice; only an email can go out twice, if the worker dies after the mail server accepted
-it but before the job's transaction commits.
+applied twice. Only an email can go out twice: when the mail server has accepted it, and the
+worker then dies before the job commits or stops waiting for the server's reply.
 """
 
 import logging

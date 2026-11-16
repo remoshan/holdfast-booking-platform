@@ -239,8 +239,8 @@ async def _until_a_query_waits_for_a_lock(app: FastAPI) -> None:
         while True:
             waiting = await session.scalar(
                 text(
-                    "SELECT count(*) FROM pg_stat_activity"
-                    " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    " AND backend_type = 'client backend' AND wait_event_type = 'Lock'"
                 )
             )
             if waiting:

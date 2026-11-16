@@ -27,9 +27,12 @@ async def run_migrations_online() -> None:
         DatabaseSettings().database_url
     )
     engine = create_async_engine(database_url)
-    async with engine.connect() as connection:
-        await connection.run_sync(run_migrations)
-    await engine.dispose()
+    try:
+        async with engine.connect() as connection:
+            await connection.run_sync(run_migrations)
+    finally:
+        # Also when a migration fails, or its connection stays open until the process ends.
+        await engine.dispose()
 
 
 asyncio.run(run_migrations_online())
