@@ -2,6 +2,7 @@
 it may take."""
 
 import asyncio
+import smtplib
 from datetime import UTC, datetime, timedelta
 from email import message_from_bytes
 from email.utils import getaddresses, parsedate_to_datetime
@@ -34,7 +35,7 @@ def test_the_sender_is_one_address(mail_from: str, address: tuple[str, str]) -> 
 
 
 def test_every_email_carries_the_date_it_was_sent() -> None:
-    [accepted] = asyncio.run(_send_a_reminder(quit_reply=b"221 Bye\r\n"))
+    [accepted] = asyncio.run(_send_a_reminder())
 
     message = message_from_bytes(accepted)
     assert abs(parsedate_to_datetime(message["Date"]) - datetime.now(UTC)) < timedelta(minutes=1)
@@ -45,23 +46,35 @@ def test_every_email_carries_the_date_it_was_sent() -> None:
 )
 def test_an_email_the_server_accepted_counts_as_sent_whatever_follows(quit_reply: bytes) -> None:
     """Otherwise the job would fail, and its next attempt would send the email again."""
-    accepted = asyncio.run(_send_a_reminder(quit_reply))
+    accepted = asyncio.run(_send_a_reminder(quit_reply=quit_reply))
 
     assert len(accepted) == 1
 
 
-async def _send_a_reminder(quit_reply: bytes) -> list[bytes]:
-    """Send a reminder through the real smtplib to a stand-in mail server, which accepts it and
-    then answers QUIT with quit_reply, or hangs up if that is empty. Returns what it accepted."""
-    accepted: list[bytes] = []
+@pytest.mark.parametrize("data_reply", [b"554 Rejected\r\n", b""], ids=["a refusal", "a hang-up"])
+def test_an_email_the_server_did_not_accept_fails_the_attempt(data_reply: bytes) -> None:
+    """So the job tries again later, instead of losing the reminder."""
+    with pytest.raises(smtplib.SMTPException):
+        asyncio.run(_send_a_reminder(data_reply=data_reply))
+
+
+async def _send_a_reminder(
+    *, data_reply: bytes = b"250 Accepted\r\n", quit_reply: bytes = b"221 Bye\r\n"
+) -> list[bytes]:
+    """Send a reminder through the real smtplib to a stand-in mail server, which answers the
+    email with data_reply and QUIT with quit_reply, or hangs up in place of an empty reply.
+    Returns the emails it received."""
+    received: list[bytes] = []
 
     async def converse(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(b"220 Ready\r\n")
         while command := (await reader.readline()).upper():
             if command.startswith(b"DATA"):
                 writer.write(b"354 Go ahead\r\n")
-                accepted.append(await reader.readuntil(b"\r\n.\r\n"))
-                writer.write(b"250 Accepted\r\n")
+                received.append(await reader.readuntil(b"\r\n.\r\n"))
+                if not data_reply:
+                    break
+                writer.write(data_reply)
             elif command.startswith(b"QUIT"):
                 writer.write(quit_reply)
                 break
@@ -73,7 +86,7 @@ async def _send_a_reminder(quit_reply: bytes) -> list[bytes]:
         host, port = server.sockets[0].getsockname()
         mailer = Mailer(host, port, "Holdfast <reminders@example.com>")
         await mailer.send("ada@example.com", "Reminder", "Body", "<reminder.1@holdfast>")
-    return accepted
+    return received
 
 
 def test_the_workers_session_limit_outlasts_the_slowest_send() -> None:
