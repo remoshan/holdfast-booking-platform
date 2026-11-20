@@ -63,8 +63,12 @@ async def purge_ended_families(session: AsyncSession, now: datetime) -> None:
             )
         )
     )
+    # No token is loaded in this session, so SQLAlchemy need not fetch back the deleted ids to
+    # update it. With a large first purge, that fetch would cost more than the delete.
     await session.execute(
-        delete(RefreshTokenRecord).where(RefreshTokenRecord.family_id.in_(ended_families))
+        delete(RefreshTokenRecord)
+        .where(RefreshTokenRecord.family_id.in_(ended_families))
+        .execution_options(synchronize_session=False)
     )
 
 

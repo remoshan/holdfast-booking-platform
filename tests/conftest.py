@@ -38,6 +38,7 @@ PASSWORD = "correct horse battery staple"
 TIMEZONE = "Europe/Amsterdam"
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 BOOKING_DAYS_AHEAD = 7  # Inside the booking horizon, and never in the past.
+LOCK_WAIT_SECONDS = 10
 EMPTY_ALL_TABLES = text(
     f"TRUNCATE {', '.join(table.name for table in Base.metadata.sorted_tables)}"
 )
@@ -142,6 +143,28 @@ def stored_jobs(app: FastAPI) -> Callable[[], Awaitable[list[JobRecord]]]:
             return list(await session.scalars(select(JobRecord).order_by(JobRecord.run_at)))
 
     return stored_jobs
+
+
+@pytest.fixture
+def until_a_query_waits_for_a_lock(app: FastAPI) -> Callable[[], Awaitable[None]]:
+    """Wait until a query is blocked on a lock, such as one that the test's open transaction
+    holds, so the test knows a concurrent request has reached that point."""
+
+    async def until_a_query_waits_for_a_lock() -> None:
+        async with app.state.sessions() as session, asyncio.timeout(LOCK_WAIT_SECONDS):
+            while True:
+                waiting = await session.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                        " AND backend_type = 'client backend' AND wait_event_type = 'Lock'"
+                    )
+                )
+                if waiting:
+                    return
+                await session.rollback()  # the next count takes a fresh snapshot
+                await asyncio.sleep(0.05)
+
+    return until_a_query_waits_for_a_lock
 
 
 @pytest.fixture

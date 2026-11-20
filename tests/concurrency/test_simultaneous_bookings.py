@@ -57,8 +57,8 @@ async def test_only_one_of_many_simultaneous_requests_for_a_slot_succeeds(
 async def test_simultaneous_retries_with_one_idempotency_key_make_one_booking(
     client: AsyncClient, organisation: Json, resource: Json, book: Book
 ) -> None:
-    """Most retries race the first request's INSERT rather than find its booking, and wait for
-    it on the key's unique index."""
+    """Retries that look up the key before the first request commits race its INSERT and wait
+    for its transaction to end; the rest, most of them, find its booking."""
     await _open_pooled_connections(client)
     key = {"Idempotency-Key": str(uuid4())}
 

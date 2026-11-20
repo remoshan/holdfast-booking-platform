@@ -22,7 +22,7 @@ class ApiSettings(DatabaseSettings):
 
 
 class WorkerSettings(DatabaseSettings):
-    smtp_host: str
+    smtp_host: str = Field(min_length=1)
     """Mail server that relays reminder emails, such as a local Mailpit."""
     smtp_port: int = Field(ge=1, le=65535)
     mail_from: NameEmail
@@ -30,9 +30,10 @@ class WorkerSettings(DatabaseSettings):
 
     @property
     def sender(self) -> str:
-        """MAIL_FROM as a From header. str() of a NameEmail drops the quotes that a display name
-        with a comma or a colon needs, which would split it into two addresses. The address goes
-        in as its two parts: formataddr refuses any non-ASCII address, and Address(addr_spec=...)
-        parses it again and rejects a non-ASCII local part, both of which NameEmail accepts."""
+        """MAIL_FROM as a From header. str() of a NameEmail drops the quotes that some display
+        names need: a comma would split the header into two addresses, and a colon would make
+        the text before it a group name. The address goes in as its two parts: formataddr refuses
+        any non-ASCII address, and Address(addr_spec=...) parses it again and rejects a non-ASCII
+        local part, both of which NameEmail accepts."""
         username, _, domain = self.mail_from.email.rpartition("@")
         return str(Address(self.mail_from.name, username, domain))
