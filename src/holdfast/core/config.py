@@ -22,7 +22,7 @@ class ApiSettings(DatabaseSettings):
 
 
 class WorkerSettings(DatabaseSettings):
-    smtp_host: str
+    smtp_host: str = Field(min_length=1)
     """Mail server that relays reminder emails, such as a local Mailpit."""
     smtp_port: int = Field(ge=1, le=65535)
     mail_from: NameEmail
