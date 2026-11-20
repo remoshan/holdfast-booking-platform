@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -274,11 +275,70 @@ async def test_a_repeated_idempotency_key_returns_the_first_booking(
     assert stored.json()["items"] == [first.json()]
 
 
+async def test_a_retry_after_the_booking_was_cancelled_returns_it_cancelled(
+    client: AsyncClient, organisation: Json, book: Book
+) -> None:
+    """A retry gets the booking its key made as it is now, rather than a new booking."""
+    key = {"Idempotency-Key": str(uuid4())}
+    first = (await book("09:00", "10:00", headers=key)).json()
+    await client.post(f"/organisations/{organisation['id']}/bookings/{first['id']}/cancel")
+
+    retried = await book("09:00", "10:00", headers=key)
+
+    assert retried.status_code == status.HTTP_201_CREATED
+    assert retried.json() == first | {"status": "cancelled"}
+
+
 async def test_an_idempotency_key_cannot_be_reused_for_another_booking(book: Book) -> None:
     key = {"Idempotency-Key": "my-first-booking"}
     await book("09:00", "10:00", headers=key)
 
     response = await book("11:00", "12:00", headers=key)
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["type"].endswith("#idempotency-key-reused")
+
+
+async def test_an_idempotency_key_cannot_be_reused_for_another_resource(
+    organisation: Json, location: Json, book: Book, create_resource: Factory
+) -> None:
+    room_2 = await create_resource(organisation["id"], location["id"], name="Room 2")
+    key = {"Idempotency-Key": "my-first-booking"}
+    await book("09:00", "10:00", headers=key)
+
+    response = await book("09:00", "10:00", headers=key, resource_id=room_2["id"])
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["type"].endswith("#idempotency-key-reused")
+
+
+async def test_reusing_a_key_while_its_first_booking_is_being_made_is_refused(
+    app: FastAPI,
+    organisation: Json,
+    resource: Json,
+    user: Json,
+    book: Book,
+    at: Callable[..., str],
+    until_a_query_waits_for_a_lock: Callable[[], Awaitable[None]],
+) -> None:
+    """The second request cannot see the first booking yet, so it reaches the INSERT and waits
+    on the key's unique index. The INSERT names no conflict target, so it then inserts nothing
+    instead of failing on that index, and the request finds the first booking."""
+    key = "my-first-booking"
+    start, end = (datetime.fromisoformat(at(clock)).astimezone(UTC) for clock in ("09:00", "10:00"))
+    async with app.state.sessions() as first_request, first_request.begin():
+        await bookings.add(
+            first_request,
+            UUID(organisation["id"]),
+            UUID(resource["id"]),
+            UUID(user["id"]),
+            Period(start, end),
+            price=0,
+            idempotency_key=key,
+        )
+        reuse = asyncio.ensure_future(book("11:00", "12:00", headers={"Idempotency-Key": key}))
+        await until_a_query_waits_for_a_lock()
+    response = await reuse
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert response.json()["type"].endswith("#idempotency-key-reused")
@@ -346,19 +406,27 @@ async def test_members_cannot_see_or_cancel_other_peoples_bookings(
     assert (seen.status_code, cancelled.status_code) == (404, 404)
 
 
-async def test_members_can_cancel_their_own_bookings(
-    client: AsyncClient, organisation: Json, book: Book, add_member: Factory
+@pytest.mark.parametrize(
+    ("action", "status_after"), [("confirm", "confirmed"), ("cancel", "cancelled")]
+)
+async def test_members_can_confirm_or_cancel_their_own_bookings(
+    client: AsyncClient,
+    organisation: Json,
+    book: Book,
+    add_member: Factory,
+    action: str,
+    status_after: str,
 ) -> None:
     member = await add_member(organisation["id"], "member")
     booking = (await book("09:00", "10:00", headers=member["headers"])).json()
 
     response = await client.post(
-        f"/organisations/{organisation['id']}/bookings/{booking['id']}/cancel",
+        f"/organisations/{organisation['id']}/bookings/{booking['id']}/{action}",
         headers=member["headers"],
     )
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["status"] == "cancelled"
+    assert response.json()["status"] == status_after
 
 
 async def test_upcoming_bookings_are_your_own_soonest_first_in_every_organisation(

@@ -11,7 +11,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from fastapi import FastAPI
 from httpx import AsyncClient, Response
-from sqlalchemy import Connection, delete, text
+from sqlalchemy import Connection, delete, text, update
 from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -95,12 +95,14 @@ async def test_the_reminder_backfill_queues_what_confirming_would_have(
     stored_jobs: Callable[[], Awaitable[list[JobRecord]]],
 ) -> None:
     """Replays migration 0008 over bookings from before reminders existed. Only a confirmed
-    booking that starts more than a day ahead, and has no reminder yet, gets one."""
+    booking that starts more than a day ahead, and has no reminder yet, not even a dead one,
+    gets one."""
     reminded = (await book("09:00", "10:00", resource_id=free_resource["id"])).json()
     forgotten = (await book("11:00", "12:00", resource_id=free_resource["id"])).json()
     cancelled = (await book("13:00", "14:00", resource_id=free_resource["id"])).json()
     await client.post(f"/organisations/{organisation['id']}/bookings/{cancelled['id']}/cancel")
     await book("15:00", "16:00")  # held: it costs something and nobody confirmed it
+    expired = (await book("17:00", "18:00")).json()
     soon = datetime.now(UTC) + timedelta(hours=2)
     async with app.state.sessions() as session, session.begin():
         await bookings.add(
@@ -111,12 +113,23 @@ async def test_the_reminder_backfill_queues_what_confirming_would_have(
             Period(soon, soon + timedelta(hours=1)),
             price=0,
         )
-        # As if every booking but the first had been confirmed before migration 0006.
+        await session.execute(
+            update(BookingRecord)
+            .where(BookingRecord.id == UUID(expired["id"]))
+            .values(status=BookingStatus.EXPIRED)
+        )
+        # As if every booking but the first had been confirmed before migration 0006, and the
+        # first one's reminder had failed for good.
         await session.execute(
             delete(JobRecord).where(
                 JobRecord.kind == JobKind.SEND_REMINDER,
                 ~JobRecord.payload.contains({"booking_id": reminded["id"]}),
             )
+        )
+        await session.execute(
+            update(JobRecord)
+            .where(JobRecord.payload.contains({"booking_id": reminded["id"]}))
+            .values(status=JobStatus.DEAD)
         )
 
     await asyncio.to_thread(command.downgrade, alembic_config, "0007")
@@ -130,6 +143,44 @@ async def test_the_reminder_backfill_queues_what_confirming_would_have(
     assert queued.payload == {"organisation_id": organisation["id"], "booking_id": forgotten["id"]}
     assert (queued.status, queued.attempts) == (JobStatus.QUEUED, 0)
     assert queued.run_at == datetime.fromisoformat(forgotten["start"]) - REMINDER_LEAD
+
+
+async def test_undoing_the_holds_migration_cancels_unpaid_holds_and_keeps_the_rest(
+    app: FastAPI,
+    alembic_config: Config,
+    database_url: str,
+    book: Callable[..., Awaitable[Response]],
+    free_resource: Json,
+) -> None:
+    """The schema before migration 0006 knows neither held nor expired bookings, and its overlap
+    constraint counts both as active. Undoing it must therefore cancel them before it rebuilds
+    that constraint, since the held booking here sits in the slot the expired one freed. Redoing
+    it afterwards works over the bookings that are left."""
+    expired = (await book("09:00", "10:00")).json()
+    async with app.state.sessions() as session, session.begin():
+        await session.execute(
+            update(BookingRecord)
+            .where(BookingRecord.id == UUID(expired["id"]))
+            .values(status=BookingStatus.EXPIRED)
+        )
+    held = (await book("09:00", "10:00")).json()
+    confirmed = (await book("09:00", "10:00", resource_id=free_resource["id"])).json()
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0005")
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            rows = await connection.execute(text("SELECT id::text, status FROM bookings"))
+            statuses: dict[str, str] = dict(rows.all())
+    finally:
+        await engine.dispose()
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+
+    assert statuses == {
+        held["id"]: "cancelled",
+        expired["id"]: "cancelled",
+        confirmed["id"]: "confirmed",
+    }
 
 
 @pytest.mark.parametrize(
