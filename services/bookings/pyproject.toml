@@ -1,0 +1,75 @@
+[project]
+name = "holdfast-bookings"
+version = "0.1.0"
+description = "Holdfast's booking service: the HTTP API and the worker that runs its background jobs."
+license = "MIT"
+authors = [{ name = "Francis Remoshan" }]
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.20.1",
+    "argon2-cffi>=25.1.0",
+    "asyncpg>=0.32.0",
+    "email-validator>=2.3.0",
+    "fastapi>=0.162.0",
+    "pydantic-settings>=2.16.2",
+    "pyjwt>=2.15.1",
+    "sqlalchemy[asyncio]>=2.1.6",
+    "tzdata>=2026.6",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Every service is one part of the holdfast namespace package, so there is no holdfast/__init__.py.
+module-name = "holdfast.bookings"
+
+[tool.alembic]
+# Relative to this file, not to the folder Alembic runs in.
+script_location = "%(here)s/migrations"
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests", "migrations", "scripts"]
+# Name modules after their path (tests.unit.conftest), so the two conftest.py files don't clash.
+mypy_path = ["src"]
+explicit_package_bases = true
+
+[tool.importlinter]
+root_package = "holdfast.bookings"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers only import the layers below them"
+type = "layers"
+layers = [
+    "holdfast.bookings.main | holdfast.bookings.worker",
+    "holdfast.bookings.api",
+    "holdfast.bookings.services",
+    "holdfast.bookings.repositories",
+    "holdfast.bookings.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Routers reach the database only through services"
+type = "forbidden"
+source_modules = ["holdfast.bookings.api"]
+forbidden_modules = ["holdfast.bookings.repositories"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "The domain is free of frameworks"
+type = "forbidden"
+source_modules = ["holdfast.bookings.domain"]
+forbidden_modules = ["fastapi", "pydantic", "sqlalchemy", "starlette"]
+
+[tool.pytest]
+strict = true
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+# Lets tests import the scripts they cover, such as scripts.seed.
+pythonpath = ["."]
+filterwarnings = ["error"]

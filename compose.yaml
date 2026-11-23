@@ -1,8 +1,11 @@
 name: holdfast
 
-x-holdfast-image: &holdfast-image
-  build: .
-  image: holdfast:local
+x-bookings-image: &bookings-image
+  build:
+    context: .
+    args:
+      SERVICE: bookings
+  image: holdfast-bookings:local
 
 x-database-url: &database-url
   DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@database:5432/holdfast
@@ -33,7 +36,7 @@ services:
       - "127.0.0.1:8025:8025"
 
   migrate:
-    <<: *holdfast-image
+    <<: *bookings-image
     command: ["alembic", "upgrade", "head"]
     environment:
       <<: *database-url
@@ -42,7 +45,8 @@ services:
         condition: service_healthy
 
   api:
-    <<: *holdfast-image
+    <<: *bookings-image
+    command: ["uvicorn", "holdfast.bookings.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       <<: *database-url
       # Local development only. Every deployed environment sets its own random secret.
@@ -55,8 +59,8 @@ services:
         condition: service_completed_successfully
 
   worker:
-    <<: *holdfast-image
-    command: ["python", "-m", "holdfast.worker"]
+    <<: *bookings-image
+    command: ["python", "-m", "holdfast.bookings.worker"]
     # Longer than the slowest job, a reminder whose send is cut off at SEND_DEADLINE_SECONDS,
     # so that `docker compose stop` lets the job in hand finish.
     stop_grace_period: 2m

@@ -27,7 +27,7 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | 3 | Authentication and per-organisation roles | Done |
 | 4 | Data under pressure: indexes, query plans, pagination at depth | Done |
 | 5 | Background work: expiring holds, job queue, idempotency | Done |
-| 6 | Payment saga, outbox, two extracted services | Planned |
+| 6 | Payment saga, outbox, two extracted services | In progress |
 | 7 | Hardening: OWASP review, rate limits, tracing | Planned |
 
 ## Tech stack
@@ -43,7 +43,7 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | Email | SMTP from the standard library; Mailpit catches it locally |
 | Testing | pytest, HTTPX, Testcontainers (real Postgres and Mailpit, never SQLite) |
 | Quality gates | Ruff, mypy (strict), import-linter, pre-commit |
-| Packaging | uv |
+| Packaging | uv, as a workspace with one project per service |
 | Local environment | Docker Compose, Make |
 | CI | GitHub Actions |
 
@@ -72,10 +72,12 @@ Postgres listens on `127.0.0.1:54320` for local tools, with `holdfast` as user, 
 | `make seed` | Fill the empty local database with a million bookings, in three minutes or more |
 | `make explain` | Measure the hot queries with `EXPLAIN ANALYZE`, before and after their indexes |
 | `make format` | Format code and apply safe lint fixes |
-| `make lint` | Ruff lint and format check, plus the layer import rules |
+| `make lint` | Ruff lint and format check, plus each service's layer import rules, which `make imports` checks alone |
 | `make typecheck` | mypy in strict mode |
 | `make test` | Run the test suite (needs Docker for Testcontainers) |
 | `make check` | Lint, type-check and test: exactly what CI runs |
+
+Run `uv sync` from the repository root. In a service's folder it would install only that service and remove the shared development tools, pre-commit among them, until the next sync from the root.
 
 ### Configuration
 
@@ -199,7 +201,7 @@ Errors that the HTTP status explains fully, such as `401 Unauthorized`, `403 For
 
 ## Background work
 
-`make up` also starts a worker, `python -m holdfast.worker`. It runs the jobs that the API queues in the `jobs` table, in the same transaction as the change that needs them. Once a day it also deletes the refresh tokens of sign-ins that have ended, whose tokens have all expired or been revoked. A sign-in with a live token keeps its used ones, because a used token sent again must still find its sign-in to end it (ADR-0008). Deleting twice changes nothing, so this cleanup needs no job of its own.
+`make up` also starts a worker, `python -m holdfast.bookings.worker`. It runs the jobs that the API queues in the `jobs` table, in the same transaction as the change that needs them. Once a day it also deletes the refresh tokens of sign-ins that have ended, whose tokens have all expired or been revoked. A sign-in with a live token keeps its used ones, because a used token sent again must still find its sign-in to end it (ADR-0008). Deleting twice changes nothing, so this cleanup needs no job of its own.
 
 | Job | Queued when | Runs | Does |
 | --- | --- | --- | --- |
@@ -219,7 +221,7 @@ UPDATE jobs SET status = 'queued', attempts = 0, run_at = now() WHERE id = '<job
 
 ## Testing
 
-`make test` runs three suites; `uv run pytest tests/<suite>` runs one of them.
+`make test` runs the booking service's three suites, which live in `services/bookings/tests`; `uv run --all-packages --directory services/bookings pytest tests/<suite>` runs one of them.
 
 | Suite | What it proves |
 | --- | --- |
@@ -289,7 +291,7 @@ The busiest resource has 2,013 bookings, so the last page of its list is about 1
 
 ## Architecture
 
-Holdfast is a modular monolith with strict layers. Each layer may import only the layers below it.
+Holdfast is a uv workspace with one folder per service under `services/`, each with its own dependencies, settings, migrations, tests and container image, and its package in the `holdfast` namespace, such as `holdfast.bookings`. The booking service is a modular monolith with strict layers: each layer may import only the layers below it.
 
 ```mermaid
 flowchart TD
@@ -304,25 +306,29 @@ The API and the worker are two entry points into the same services. import-linte
 
 ```text
 holdfast-booking-platform/
-├── src/holdfast/
-│   ├── main.py            # application factory and lifespan
-│   ├── worker.py          # background worker process
-│   ├── api/               # routers, request/response schemas, problem details
-│   ├── services/          # use cases, one transaction each, and the jobs that run later
-│   ├── domain/            # entities and booking rules, free of frameworks
-│   ├── repositories/      # table mappings and all SQL
-│   └── core/              # settings, password hashing, tokens and email
-├── migrations/            # Alembic environment and versioned migrations
-├── scripts/
-│   ├── seed.py            # realistic volume for measuring queries
-│   └── explain.py         # EXPLAIN ANALYZE of the hot queries
-├── tests/
-│   ├── unit/              # domain rules, no database
-│   ├── integration/       # through HTTP against a real Postgres
-│   └── concurrency/       # racing bookings, racing workers, a worker killed mid-job
+├── services/
+│   └── bookings/                  # the booking service
+│       ├── src/holdfast/bookings/
+│       │   ├── main.py            # application factory and lifespan
+│       │   ├── worker.py          # background worker process
+│       │   ├── api/               # routers, request/response schemas, problem details
+│       │   ├── services/          # use cases, one transaction each, and the jobs that run later
+│       │   ├── domain/            # entities and booking rules, free of frameworks
+│       │   ├── repositories/      # table mappings and all SQL
+│       │   └── core/              # settings, password hashing, tokens and email
+│       ├── migrations/            # Alembic environment and versioned migrations
+│       ├── scripts/
+│       │   ├── seed.py            # realistic volume for measuring queries
+│       │   └── explain.py         # EXPLAIN ANALYZE of the hot queries
+│       ├── tests/
+│       │   ├── unit/              # domain rules, no database
+│       │   ├── integration/       # through HTTP against a real Postgres
+│       │   └── concurrency/       # racing bookings, racing workers, a worker killed mid-job
+│       └── pyproject.toml         # the service's dependencies and tool settings
 ├── compose.yaml
-├── Dockerfile
-└── Makefile
+├── Dockerfile                     # builds the image of any one service
+├── Makefile
+└── pyproject.toml                 # the workspace, shared development tools and lint rules
 ```
 
 ## Architecture decisions

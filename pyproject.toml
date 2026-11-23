@@ -1,28 +1,9 @@
-[project]
-name = "holdfast"
-version = "0.1.0"
-description = "Multi-tenant booking platform for shared spaces that guarantees no double-booking."
-readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
-authors = [{ name = "Francis Remoshan" }]
-requires-python = ">=3.14"
-dependencies = [
-    "alembic>=1.20.1",
-    "argon2-cffi>=25.1.0",
-    "asyncpg>=0.32.0",
-    "email-validator>=2.3.0",
-    "fastapi>=0.162.0",
-    "pydantic-settings>=2.16.2",
-    "pyjwt>=2.15.1",
-    "sqlalchemy[asyncio]>=2.1.6",
-    "tzdata>=2026.6",
-    "uvicorn>=0.54.0",
-]
+# A uv workspace with one project per service, each in its own folder under services/. Every
+# service keeps its own dependencies and its own type-check, import-rule and test settings; the
+# development tools and the lint and format rules below are shared by all of them.
 
-[build-system]
-requires = ["uv_build>=0.13.6,<0.14"]
-build-backend = "uv_build"
+[tool.uv.workspace]
+members = ["services/*"]
 
 [dependency-groups]
 dev = [
@@ -35,61 +16,18 @@ dev = [
     "testcontainers>=4.15.0",
 ]
 
-[tool.alembic]
-script_location = "migrations"
-
 [tool.ruff]
 line-length = 100
+# The workspace root has no requires-python for Ruff to read it from.
+target-version = "py314"
+# Each service's own packages, such as holdfast and the scripts its tests import, are first-party.
+src = ["services/*", "services/*/src"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "B", "S", "C4", "SIM", "PT", "ASYNC", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests assert, and sign in with fixed fake credentials.
-"tests/**" = ["S101", "S105", "S106"]
+"**/tests/**" = ["S101", "S105", "S106"]
 # Seed data needs repeatable randomness, not secrecy.
-"scripts/**" = ["S311"]
-
-[tool.mypy]
-strict = true
-plugins = ["pydantic.mypy"]
-files = ["src", "tests", "migrations", "scripts"]
-# Name modules after their path (tests.unit.conftest), so the two conftest.py files don't clash.
-mypy_path = ["src"]
-explicit_package_bases = true
-
-[tool.importlinter]
-root_package = "holdfast"
-include_external_packages = true
-
-[[tool.importlinter.contracts]]
-name = "Layers only import the layers below them"
-type = "layers"
-layers = [
-    "holdfast.main | holdfast.worker",
-    "holdfast.api",
-    "holdfast.services",
-    "holdfast.repositories",
-    "holdfast.domain",
-]
-
-[[tool.importlinter.contracts]]
-name = "Routers reach the database only through services"
-type = "forbidden"
-source_modules = ["holdfast.api"]
-forbidden_modules = ["holdfast.repositories"]
-allow_indirect_imports = true
-
-[[tool.importlinter.contracts]]
-name = "The domain is free of frameworks"
-type = "forbidden"
-source_modules = ["holdfast.domain"]
-forbidden_modules = ["fastapi", "pydantic", "sqlalchemy", "starlette"]
-
-[tool.pytest]
-strict = true
-testpaths = ["tests"]
-addopts = ["--import-mode=importlib"]
-# Lets tests import the scripts they cover, such as scripts.seed.
-pythonpath = ["."]
-filterwarnings = ["error"]
+"**/scripts/**" = ["S311"]

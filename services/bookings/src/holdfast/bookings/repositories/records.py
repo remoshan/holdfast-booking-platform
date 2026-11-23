@@ -1,0 +1,209 @@
+"""SQLAlchemy table mappings. Repositories translate these records into domain entities."""
+
+from datetime import datetime
+from enum import StrEnum
+from uuid import UUID
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    MetaData,
+    String,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, Range
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from holdfast.bookings.domain.bookings import INACTIVE_STATUSES, BookingStatus
+from holdfast.bookings.domain.jobs import JobKind, JobStatus
+from holdfast.bookings.domain.memberships import Role
+from holdfast.bookings.domain.resources import ResourceKind
+
+# Deterministic constraint names, so migrations can reference and drop them reliably.
+NAMING_CONVENTION = {
+    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+ACTIVE_BOOKING = "status NOT IN ({})".format(
+    ", ".join(f"'{status}'" for status in sorted(INACTIVE_STATUSES))
+)
+"""The rows of bookings that still hold their time, written from INACTIVE_STATUSES."""
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+class EntityRecord(Base):
+    """Columns every entity table shares: a UUIDv7 key and a creation timestamp."""
+
+    __abstract__ = True
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=func.uuidv7())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+def _string_enum(enum: type[StrEnum], name: str) -> Enum:
+    """Store enum values as text guarded by a CHECK constraint, which is easier to extend later
+    than a native Postgres enum."""
+    return Enum(
+        enum,
+        name=name,
+        native_enum=False,
+        create_constraint=True,
+        length=32,
+        values_callable=lambda members: [member.value for member in members],
+    )
+
+
+class UserRecord(EntityRecord):
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(unique=True)
+    password_hash: Mapped[str]
+
+
+class RefreshTokenRecord(EntityRecord):
+    __tablename__ = "refresh_tokens"
+
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    # A replayed token or a logout revokes the whole family at once.
+    family_id: Mapped[UUID] = mapped_column(index=True)
+    token_hash: Mapped[str] = mapped_column(unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OrganisationRecord(EntityRecord):
+    __tablename__ = "organisations"
+
+    name: Mapped[str]
+    slug: Mapped[str] = mapped_column(unique=True)
+    currency: Mapped[str] = mapped_column(String(3))
+
+
+class MembershipRecord(Base):
+    __tablename__ = "memberships"
+
+    organisation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"), primary_key=True
+    )
+    # The primary key leads with organisation_id; finding a user's organisations needs this.
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True, index=True)
+    role: Mapped[Role] = mapped_column(_string_enum(Role, "membership_role"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Joined into every query, so a membership always arrives with its member's email.
+    user: Mapped[UserRecord] = relationship(lazy="joined", innerjoin=True)
+
+
+class LocationRecord(EntityRecord):
+    __tablename__ = "locations"
+    # Child tables reference (organisation_id, id), so a row can never point into another tenant.
+    __table_args__ = (UniqueConstraint("organisation_id", "id"),)
+
+    organisation_id: Mapped[UUID] = mapped_column(ForeignKey("organisations.id"))
+    name: Mapped[str]
+    address: Mapped[str]
+    timezone: Mapped[str]
+    # A small value object that is always read and replaced as a whole, so it lives in one column.
+    opening_hours: Mapped[dict[str, dict[str, str]]] = mapped_column(JSONB)
+
+
+class ResourceRecord(EntityRecord):
+    __tablename__ = "resources"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "id"),
+        ForeignKeyConstraint(
+            ["organisation_id", "location_id"], ["locations.organisation_id", "locations.id"]
+        ),
+        CheckConstraint("capacity > 0", name="capacity_positive"),
+        CheckConstraint("hourly_price >= 0", name="hourly_price_not_negative"),
+    )
+
+    organisation_id: Mapped[UUID]
+    location_id: Mapped[UUID]
+    name: Mapped[str]
+    kind: Mapped[ResourceKind] = mapped_column(_string_enum(ResourceKind, "resource_kind"))
+    capacity: Mapped[int]
+    hourly_price: Mapped[int]
+
+
+class BookingRecord(EntityRecord):
+    __tablename__ = "bookings"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["organisation_id", "resource_id"], ["resources.organisation_id", "resources.id"]
+        ),
+        CheckConstraint("NOT isempty(period)", name="period_not_empty"),
+        CheckConstraint("price >= 0", name="price_not_negative"),
+        CheckConstraint(
+            f"status <> '{BookingStatus.HELD}' OR hold_expires_at IS NOT NULL",
+            name="hold_has_expiry",
+        ),
+        # Postgres rejects an active booking that overlaps another on the same resource, so
+        # concurrent requests can never both win. Its index also serves availability.
+        ExcludeConstraint(
+            ("resource_id", "="),
+            ("period", "&&"),
+            name="ex_bookings_no_overlap",
+            using="gist",
+            where=ACTIVE_BOOKING,
+        ),
+        # A resource's bookings in key order, for keyset pages and for the foreign-key check
+        # when a resource is deleted.
+        Index("ix_bookings_resource_id_id", "resource_id", "id"),
+        # A user's active bookings in order of end time, so the ones that have not ended form
+        # one short range at the end of the user's entries, however long their history.
+        Index(
+            "ix_bookings_active_user_id_end",
+            "user_id",
+            text("upper(period)"),
+            postgresql_where=text(ACTIVE_BOOKING),
+        ),
+        # Finds the booking that a retried request already made. Each user has their own keys.
+        Index(
+            "uq_bookings_user_id_idempotency_key",
+            "user_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
+
+    organisation_id: Mapped[UUID]
+    resource_id: Mapped[UUID]
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    period: Mapped[Range[datetime]] = mapped_column(TSTZRANGE)
+    status: Mapped[BookingStatus] = mapped_column(_string_enum(BookingStatus, "booking_status"))
+    price: Mapped[int]
+    hold_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+
+
+class JobRecord(EntityRecord):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        # Workers look only at queued jobs, the most overdue first.
+        Index(
+            "ix_jobs_queued_run_at",
+            "run_at",
+            postgresql_where=text(f"status = '{JobStatus.QUEUED}'"),
+        ),
+    )
+
+    kind: Mapped[JobKind] = mapped_column(_string_enum(JobKind, "job_kind"))
+    payload: Mapped[dict[str, str]] = mapped_column(JSONB)
+    status: Mapped[JobStatus] = mapped_column(_string_enum(JobStatus, "job_status"))
+    attempts: Mapped[int]
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None]

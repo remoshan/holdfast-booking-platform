@@ -15,7 +15,7 @@ repos:
         name: uv lock is up to date
         entry: uv lock --check
         language: system
-        files: ^(pyproject\.toml|uv\.lock)$
+        files: (^|/)pyproject\.toml$|^uv\.lock$
         pass_filenames: false
       - id: ruff-check
         name: ruff check
@@ -27,15 +27,16 @@ repos:
         entry: uv run ruff format
         language: system
         types_or: [python, pyi]
+      # Each service type-checks and checks its import rules from its own folder; make runs them all.
       - id: mypy
         name: mypy
-        entry: uv run mypy
+        entry: make typecheck
         language: system
         types_or: [python, pyi]
         pass_filenames: false
       - id: import-linter
         name: layer import rules
-        entry: uv run lint-imports
+        entry: make imports
         language: system
         types_or: [python, pyi]
         pass_filenames: false

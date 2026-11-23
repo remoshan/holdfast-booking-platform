@@ -29,4 +29,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: docker build .
+      - run: docker build --build-arg SERVICE=bookings .
