@@ -18,11 +18,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from holdfast.bookings.domain.bookings import INACTIVE_STATUSES, BookingStatus
 from holdfast.bookings.domain.errors import BookingConflictError
-from holdfast.bookings.domain.jobs import JobKind, JobStatus
 from holdfast.bookings.domain.periods import Period
 from holdfast.bookings.domain.reminders import REMINDER_LEAD
 from holdfast.bookings.repositories import bookings
-from holdfast.bookings.repositories.records import Base, BookingRecord, JobRecord
+from holdfast.bookings.repositories.records import Base, BookingRecord
+from holdfast.bookings.services.jobs import JobKind
+from holdfast.messaging.inbox import UNREADABLE
+from holdfast.messaging.jobs import enqueue
+from holdfast.messaging.records import JobRecord, JobStatus
 
 pytestmark = pytest.mark.anyio
 
@@ -135,7 +138,7 @@ async def test_the_reminder_backfill_queues_what_confirming_would_have(
     await asyncio.to_thread(command.downgrade, alembic_config, "0007")
     await asyncio.to_thread(command.upgrade, alembic_config, "head")
 
-    reminders = [job for job in await stored_jobs() if job.kind is JobKind.SEND_REMINDER]
+    reminders = [job for job in await stored_jobs() if job.kind == JobKind.SEND_REMINDER]
     assert sorted(job.payload["booking_id"] for job in reminders) == sorted(
         [reminded["id"], forgotten["id"]]
     )
@@ -181,6 +184,55 @@ async def test_undoing_the_holds_migration_cancels_unpaid_holds_and_keeps_the_re
         expired["id"]: "cancelled",
         confirmed["id"]: "confirmed",
     }
+
+
+async def test_undoing_the_job_kinds_migration_keeps_only_the_booking_services_kinds(
+    app: FastAPI,
+    alembic_config: Config,
+    database_url: str,
+    stored_jobs: Callable[[], Awaitable[list[JobRecord]]],
+) -> None:
+    """At head the database stores a job of any kind, such as a message the booking service will
+    receive or a delivery the messaging library buried; each worker decides what it runs. Below
+    migration 0009, only the booking service's own kinds remain and the check refuses any other.
+    Redoing the migration lets every kind in again."""
+    now = datetime.now(UTC)
+    async with app.state.sessions() as session, session.begin():
+        await enqueue(session, JobKind.EXPIRE_HOLD, {}, now)
+        await enqueue(session, "payments.charge_succeeded", {}, now)
+        session.add(
+            JobRecord(
+                kind=UNREADABLE,
+                payload={"body": "?"},
+                status=JobStatus.DEAD,
+                attempts=1,
+                run_at=now,
+            )
+        )
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0008")
+    kinds_kept = [job.kind for job in await stored_jobs()]
+    engine = create_async_engine(database_url)
+    try:
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO jobs (kind, payload, status, attempts, run_at)"
+                        " VALUES ('payments.charge_succeeded', '{}', 'queued', 0, now())"
+                    )
+                )
+    finally:
+        await engine.dispose()
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    async with app.state.sessions() as session, session.begin():
+        await enqueue(session, "payments.charge_succeeded", {}, now)
+
+    assert kinds_kept == [JobKind.EXPIRE_HOLD]
+    assert sorted(job.kind for job in await stored_jobs()) == [
+        JobKind.EXPIRE_HOLD,
+        "payments.charge_succeeded",
+    ]
 
 
 @pytest.mark.parametrize(

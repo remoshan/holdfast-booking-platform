@@ -21,18 +21,10 @@ from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from holdfast.bookings.domain.bookings import INACTIVE_STATUSES, BookingStatus
-from holdfast.bookings.domain.jobs import JobKind, JobStatus
 from holdfast.bookings.domain.memberships import Role
 from holdfast.bookings.domain.resources import ResourceKind
+from holdfast.messaging.records import NAMING_CONVENTION, JobRecord, add_tables_to
 
-# Deterministic constraint names, so migrations can reference and drop them reliably.
-NAMING_CONVENTION = {
-    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
-    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
-    "ck": "ck_%(table_name)s_%(constraint_name)s",
-    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
-    "pk": "pk_%(table_name)s",
-}
 ACTIVE_BOOKING = "status NOT IN ({})".format(
     ", ".join(f"'{status}'" for status in sorted(INACTIVE_STATUSES))
 )
@@ -190,20 +182,6 @@ class BookingRecord(EntityRecord):
     idempotency_key: Mapped[str | None] = mapped_column(String(255))
 
 
-class JobRecord(EntityRecord):
-    __tablename__ = "jobs"
-    __table_args__ = (
-        # Workers look only at queued jobs, the most overdue first.
-        Index(
-            "ix_jobs_queued_run_at",
-            "run_at",
-            postgresql_where=text(f"status = '{JobStatus.QUEUED}'"),
-        ),
-    )
-
-    kind: Mapped[JobKind] = mapped_column(_string_enum(JobKind, "job_kind"))
-    payload: Mapped[dict[str, str]] = mapped_column(JSONB)
-    status: Mapped[JobStatus] = mapped_column(_string_enum(JobStatus, "job_status"))
-    attempts: Mapped[int]
-    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_error: Mapped[str | None]
+# The job queue's table belongs to the messaging library. It lives in this database, so the
+# migrations, the schema test and the tests' cleanup must see it as part of it.
+add_tables_to(Base.metadata, JobRecord)

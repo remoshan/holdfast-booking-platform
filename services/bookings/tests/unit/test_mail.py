@@ -14,10 +14,13 @@ from typing import Any
 
 import pytest
 
+from holdfast.bookings import worker
 from holdfast.bookings.core import mail
 from holdfast.bookings.core.config import WorkerSettings
 from holdfast.bookings.core.mail import SEND_DEADLINE_SECONDS, SMTP_TIMEOUT_SECONDS, Mailer
-from holdfast.bookings.worker import IDLE_IN_TRANSACTION_TIMEOUT
+from holdfast.bookings.services import auth
+from holdfast.messaging import worker as messaging_worker
+from holdfast.messaging.worker import idle_in_transaction_limit
 
 type Conversation = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
@@ -102,13 +105,32 @@ def test_a_send_that_a_slow_server_drags_out_is_cut_off_at_its_deadline(
     assert time.monotonic() - started < 5
 
 
-def test_the_workers_session_limit_outlasts_the_longest_send() -> None:
+def test_the_workers_session_limit_outlasts_the_longest_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A send ends at its deadline, or on Windows once the server next sends something, within
     the SMTP timeout. If Postgres ended the worker's idle session sooner, the attempt would go
-    unrecorded and the reminder would be sent again and again."""
-    session_limit_seconds = int(IDLE_IN_TRANSACTION_TIMEOUT.removesuffix("s"))
+    unrecorded and the reminder would be sent again and again. The messaging library derives the
+    limit from what the worker tells it, so that is what this reads."""
+    passed: dict[str, Any] = {}
 
+    async def run_worker(**arguments: Any) -> None:
+        passed.update(arguments)
+
+    monkeypatch.setattr(messaging_worker, "run_worker", run_worker)
+    settings = WorkerSettings(
+        database_url="postgresql+asyncpg://holdfast:holdfast@localhost/holdfast",
+        smtp_host="localhost",
+        smtp_port=25,
+        mail_from="Holdfast <reminders@example.com>",
+    )
+
+    asyncio.run(worker.run_worker(settings, asyncio.Event()))
+
+    session_limit_seconds = idle_in_transaction_limit(passed["longest_job"]).total_seconds()
     assert session_limit_seconds > SEND_DEADLINE_SECONDS + SMTP_TIMEOUT_SECONDS
+    assert passed["daily"] == [auth.purge_ended_sign_ins]
+    assert passed["messaging"] is None
 
 
 async def _send_a_reminder(

@@ -40,10 +40,11 @@ Each phase ends with a deployable system, a merged pull request and its architec
 | Settings and validation | Pydantic v2, pydantic-settings |
 | Authentication | JWT access tokens (PyJWT), Argon2id password hashing (argon2-cffi) |
 | Background jobs | A job table in Postgres and a worker process (`FOR UPDATE SKIP LOCKED`) |
+| Messaging | RabbitMQ 4.4 through aio-pika, behind a transactional outbox and inbox in Postgres |
 | Email | SMTP from the standard library; Mailpit catches it locally |
-| Testing | pytest, HTTPX, Testcontainers (real Postgres and Mailpit, never SQLite) |
+| Testing | pytest, HTTPX, Testcontainers (real Postgres, RabbitMQ and Mailpit, never SQLite) |
 | Quality gates | Ruff, mypy (strict), import-linter, pre-commit |
-| Packaging | uv, as a workspace with one project per service |
+| Packaging | uv, as a workspace with one project per service and per shared library |
 | Local environment | Docker Compose, Make |
 | CI | GitHub Actions |
 
@@ -72,7 +73,7 @@ Postgres listens on `127.0.0.1:54320` for local tools, with `holdfast` as user, 
 | `make seed` | Fill the empty local database with a million bookings, in three minutes or more |
 | `make explain` | Measure the hot queries with `EXPLAIN ANALYZE`, before and after their indexes |
 | `make format` | Format code and apply safe lint fixes |
-| `make lint` | Ruff lint and format check, plus each service's layer import rules, which `make imports` checks alone |
+| `make lint` | Ruff lint and format check, plus each workspace member's import rules, which `make imports` checks alone |
 | `make typecheck` | mypy in strict mode |
 | `make test` | Run the test suite (needs Docker for Testcontainers) |
 | `make check` | Lint, type-check and test: exactly what CI runs |
@@ -201,7 +202,7 @@ Errors that the HTTP status explains fully, such as `401 Unauthorized`, `403 For
 
 ## Background work
 
-`make up` also starts a worker, `python -m holdfast.bookings.worker`. It runs the jobs that the API queues in the `jobs` table, in the same transaction as the change that needs them. Once a day it also deletes the refresh tokens of sign-ins that have ended, whose tokens have all expired or been revoked. A sign-in with a live token keeps its used ones, because a used token sent again must still find its sign-in to end it (ADR-0008). Deleting twice changes nothing, so this cleanup needs no job of its own.
+`make up` also starts a worker, `python -m holdfast.bookings.worker`. It runs the jobs that the API queues in the `jobs` table, in the same transaction as the change that needs them. The queue itself belongs to the messaging library in `libs/messaging`, which the services share. Once a day it also deletes the refresh tokens of sign-ins that have ended, whose tokens have all expired or been revoked. A sign-in with a live token keeps its used ones, because a used token sent again must still find its sign-in to end it (ADR-0008). Deleting twice changes nothing, so this cleanup needs no job of its own.
 
 | Job | Queued when | Runs | Does |
 | --- | --- | --- | --- |
@@ -221,13 +222,16 @@ UPDATE jobs SET status = 'queued', attempts = 0, run_at = now() WHERE id = '<job
 
 ## Testing
 
-`make test` runs the booking service's three suites, which live in `services/bookings/tests`; `uv run --all-packages --directory services/bookings pytest tests/<suite>` runs one of them.
+`make test` runs the suites of every workspace member: the messaging library's, in `libs/messaging/tests`, and the booking service's, in `services/bookings/tests`. `uv run --all-packages --directory <member folder> pytest tests/<suite>` runs one of them.
 
 | Suite | What it proves |
 | --- | --- |
-| `tests/unit` | Booking rules, holds, availability, pricing, roles, tokens, job retries and reminders, including daylight-saving changes, and the mailer against a stand-in mail server that refuses, hangs up or drags out its replies. Runs in about two seconds without a database. |
-| `tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. A permission matrix calls every organisation endpoint as an anonymous caller, an outsider, a member, an admin and an owner, and fails if a new endpoint is missing from it. The worker's jobs run here too, with their reminders sent to a real Mailpit; among them are a confirmation that races a hold's expiry, confirmations and cancellations that wait for an expiry in progress, a job that fails at the database, and a job that another worker holds, which is passed over for the most overdue of the rest. The worker's own loop runs here as well: it deletes ended sign-ins, sets its session limit, carries on after an error, and finishes the job in hand when told to stop. A test checks that exactly the inactive booking statuses free their slot. The two migrations that cannot run in one transaction are run again over the leftovers of a failed run, the reminder backfill is replayed over bookings that are unreminded, reminded by a job that has died, cancelled, held, expired, or starting within a day, and migration 0006 is undone over held, expired and confirmed bookings. The seed script runs here too, at a small scale. |
-| `tests/concurrency` | That exactly one of 50 simultaneous requests for a slot wins, that 20 inserts released at the same instant end in one booking and clean conflicts, never deadlocks, and that 50 simultaneous retries with one `Idempotency-Key` make one booking. Four workers racing over 40 jobs run each exactly once, and a worker process killed while it waits on the mail server loses nothing, and its restarted successor sends the reminder exactly once. |
+| `libs/messaging/tests/unit` | The envelope every message travels in: what survives a round trip, and the bodies and data it refuses, so that every envelope it accepts can be stored. The job queue's retry schedule. |
+| `libs/messaging/tests/integration` | The library against a real Postgres and RabbitMQ. The job queue retries a failing job until it dies, undoes only a failing job's own writes, passes over a job another worker holds, fails a kind nobody handles like any other job, and runs a dead job again after the replay statement under Background work. A message in the outbox exists only if its transaction commits and leaves in its envelope once RabbitMQ has it; a relay that loses its commit publishes it again and the receiver drops the copy; messages no queue takes wait without holding back the rest; a broker that stops answering cannot hold a page beyond its timeout; and a confirm that the client gave up on rolls the page back as a lost connection. A message becomes one job however many copies arrive; a delivery stored but never acknowledged comes back and still makes one job; a consumer without its database holds its delivery until it can store it, and hands it back if stopped meanwhile; a consumer whose queue is deleted declares it again; and a delivery that cannot be read, or nests too deeply to be stored, is kept as a dead job, which the worker reads again once requeued after a fix. The worker runs its jobs and daily chores without a broker, keeps running jobs while RabbitMQ is unreachable as its messages wait, connects again after a connection goes silent or an operation is given up on, gives up a connection attempt that hangs, still ends when its task is cancelled, forgets old message ids when it starts, finishes the job in hand when told to stop, carries on after an error, and sets its session limit, never below five publish timeouts. |
+| `libs/messaging/tests/concurrency` | Three workers side by side share an outbox, a queue and a job table: their relays publish each of 200 messages once, counted at the queue, and they handle 200 messages, each delivered twice, exactly once. |
+| `services/bookings/tests/unit` | Booking rules, holds, availability, pricing, roles, tokens and reminders, including daylight-saving changes, and the mailer against a stand-in mail server that refuses, hangs up or drags out its replies. Runs in about two seconds without a database. |
+| `services/bookings/tests/integration` | Every endpoint through HTTP against a real Postgres, both when the request succeeds and when it fails. A permission matrix calls every organisation endpoint as an anonymous caller, an outsider, a member, an admin and an owner, and fails if a new endpoint is missing from it. The worker's jobs run here too, with their reminders sent to a real Mailpit; among them are a confirmation that races a hold's expiry, and confirmations and cancellations that wait for an expiry in progress. The worker deletes ended sign-ins as soon as it starts. A test checks that exactly the inactive booking statuses free their slot. The two migrations that cannot run in one transaction are run again over the leftovers of a failed run, the reminder backfill is replayed over bookings that are unreminded, reminded by a job that has died, cancelled, held, expired, or starting within a day, migration 0006 is undone over held, expired and confirmed bookings, and migration 0009 is undone over jobs of kinds only a newer worker knows. The seed script runs here too, at a small scale. |
+| `services/bookings/tests/concurrency` | That exactly one of 50 simultaneous requests for a slot wins, that 20 inserts released at the same instant end in one booking and clean conflicts, never deadlocks, and that 50 simultaneous retries with one `Idempotency-Key` make one booking. Four workers racing over 40 jobs run each exactly once, and a worker process killed while it waits on the mail server loses nothing, and its restarted successor sends the reminder exactly once. |
 
 ## Performance
 
@@ -291,7 +295,7 @@ The busiest resource has 2,013 bookings, so the last page of its list is about 1
 
 ## Architecture
 
-Holdfast is a uv workspace with one folder per service under `services/`, each with its own dependencies, settings, migrations, tests and container image, and its package in the `holdfast` namespace, such as `holdfast.bookings`. The booking service is a modular monolith with strict layers: each layer may import only the layers below it.
+Holdfast is a uv workspace with one folder per service under `services/`, and the libraries they share under `libs/`. Each member has its own dependencies, settings and tests, and its package in the `holdfast` namespace, such as `holdfast.bookings`; each service also has its own migrations and container image. The booking service is a modular monolith with strict layers: each layer may import only the layers below it.
 
 ```mermaid
 flowchart TD
@@ -325,6 +329,17 @@ holdfast-booking-platform/
 │       │   ├── integration/       # through HTTP against a real Postgres
 │       │   └── concurrency/       # racing bookings, racing workers, a worker killed mid-job
 │       └── pyproject.toml         # the service's dependencies and tool settings
+├── libs/
+│   └── messaging/                 # the messaging library the services share
+│       ├── src/holdfast/messaging/
+│       │   ├── envelope.py        # the envelope every message travels in
+│       │   ├── records.py         # the library's tables, which each service copies
+│       │   ├── jobs.py            # the job queue: retries, dead jobs, SKIP LOCKED
+│       │   ├── outbox.py          # messages sent with the transaction of their change
+│       │   ├── inbox.py           # messages received once each, as jobs
+│       │   └── worker.py          # the worker process a service runs
+│       ├── tests/                 # unit, integration and concurrency suites
+│       └── pyproject.toml
 ├── compose.yaml
 ├── Dockerfile                     # builds the image of any one service
 ├── Makefile
@@ -533,7 +548,7 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 </details>
 
 <details>
-<summary><strong>ADR-0012: Background jobs run from a Postgres table</strong> (Accepted, 2026-11-12; amended 2026-11-16 and 2026-11-20)</summary>
+<summary><strong>ADR-0012: Background jobs run from a Postgres table</strong> (Accepted, 2026-11-12; amended 2026-11-16, 2026-11-20 and 2026-11-25)</summary>
 
 **Context.** Phase 5 needs work done later: releasing holds that are not confirmed in time and emailing reminders. A job must exist exactly when the change that needs it commits, since a hold without its expiry job would keep its slot forever. Killing a worker mid-job must lose nothing and duplicate nothing.
 
@@ -543,7 +558,7 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 2. *A Postgres-backed library*, such as Procrastinate. Jobs commit with the change, but the library brings its own schema, migrations and worker model, to keep in step with Alembic.
 3. *A job table and a worker written here.* Jobs are rows written in the change's transaction. A worker claims one with `SELECT … FOR UPDATE SKIP LOCKED` and runs it inside that same transaction, so the job's writes commit together with its removal from the queue.
 
-**Decision.** Option 3. Each job runs in a savepoint within the transaction that claimed it. Success deletes the job. Failure rolls back the job's writes and records the attempt, retrying after 30 seconds and doubling the wait each time; the tenth failure marks the job `dead` and keeps it for inspection. An idle worker polls every second. The worker's sessions set `idle_in_transaction_session_timeout`, so a job whose worker's machine vanished without closing its connection is freed after a minute. *Amended 2026-11-16:* after five minutes. smtplib's timeout bounds each reply of a send, not the whole send, so a reminder sent through a slow mail server could outlast one minute: Postgres would end the session mid-job, the attempt would go unrecorded, and the reminder would be sent again about every minute. The limit is now thirty times the timeout for one reply. *Amended 2026-11-20:* that timeout bounds each wait for data from the server, not each reply, so a server that kept answering slowly could hold a send, and the worker with it, for ever. A send is now cut off after a minute, and the limit is five times that; connecting cannot be cut short, but it times out for each address the host resolves to.
+**Decision.** Option 3. Each job runs in a savepoint within the transaction that claimed it. Success deletes the job. Failure rolls back the job's writes and records the attempt, retrying after 30 seconds and doubling the wait each time; the tenth failure marks the job `dead` and keeps it for inspection. An idle worker polls every second. The worker's sessions set `idle_in_transaction_session_timeout`, so a job whose worker's machine vanished without closing its connection is freed after a minute. *Amended 2026-11-16:* after five minutes. smtplib's timeout bounds each reply of a send, not the whole send, so a reminder sent through a slow mail server could outlast one minute: Postgres would end the session mid-job, the attempt would go unrecorded, and the reminder would be sent again about every minute. The limit is now thirty times the timeout for one reply. *Amended 2026-11-20:* that timeout bounds each wait for data from the server, not each reply, so a server that kept answering slowly could hold a send, and the worker with it, for ever. A send is now cut off after a minute, and the limit is five times that; connecting cannot be cut short, but it times out for each address the host resolves to. *Amended 2026-11-25:* the queue moved into the messaging library, `holdfast.messaging`, so that every service's worker runs the same one. The database no longer checks a job's kind (migration 0009): each worker registers a handler for every kind it runs, and a job of a kind its worker has no handler for fails like any other, so that during a deploy a worker that knows the kind can still run it. Each service's worker declares its slowest job, and the idle limit is five times that, or five times the relay's ten-second publish timeout if that is longer.
 
 **Consequences.** A worker killed at any point loses nothing and applies nothing twice: Postgres rolls back its transaction, releases the lock, and the job is due again at once. The concurrency suite proves this by killing a worker process mid-job. Email is the exception: a worker that dies after the mail server accepted a reminder, but before committing, sends it again, so each reminder carries a stable `Message-ID` that mail clients can deduplicate. *Amended 2026-11-16:* so does any other failure between the server accepting a reminder and the job committing, such as a dropped database connection, or the server's reply to the message arriving after smtplib's timeout. A late reply fails the attempt, so a server that always replies late gets one copy per attempt, up to ten. A failure after that reply, such as an unanswered `QUIT`, does not fail the attempt. Each running job holds a connection and an open transaction, so jobs must stay short; a long job would need a lease instead of a lock. A job that crashes the process itself, rather than raising, rolls back its attempt count with everything else, so it would be retried forever instead of becoming dead. *Amended 2026-11-16:* a send that outlasts even the five-minute limit ends the same way. *Amended 2026-11-20:* a send no longer outlasts it: it is cut off after a minute, or as soon as it connects if connecting took longer.
 

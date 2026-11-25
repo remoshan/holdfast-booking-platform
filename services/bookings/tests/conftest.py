@@ -26,7 +26,8 @@ from holdfast.bookings.core import security
 from holdfast.bookings.core.config import ApiSettings
 from holdfast.bookings.core.mail import Mailer
 from holdfast.bookings.main import create_app
-from holdfast.bookings.repositories.records import Base, JobRecord
+from holdfast.bookings.repositories.records import Base
+from holdfast.messaging.records import JobRecord
 
 POSTGRES_IMAGE = "postgres:18-alpine"
 MAILPIT_IMAGE = "axllent/mailpit:v1.33"

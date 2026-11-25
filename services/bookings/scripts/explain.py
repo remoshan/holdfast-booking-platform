@@ -27,8 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, c
 
 from holdfast.bookings.domain.periods import Period
 from holdfast.bookings.domain.resources import ResourceKind
-from holdfast.bookings.repositories import bookings, jobs, organisations, refresh_tokens, resources
+from holdfast.bookings.repositories import bookings, organisations, refresh_tokens, resources
 from holdfast.bookings.repositories.records import BookingRecord, ResourceRecord
+from holdfast.messaging import jobs
 
 LOCAL_DATABASE_URL = "postgresql+asyncpg://holdfast:holdfast@127.0.0.1:54320/holdfast"
 MEASURED_INDEXES = (

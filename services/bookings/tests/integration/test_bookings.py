@@ -9,10 +9,10 @@ from fastapi import FastAPI, status
 from httpx import AsyncClient, Response
 
 from holdfast.bookings.domain.bookings import HOLD_DURATION, Booking
-from holdfast.bookings.domain.jobs import JobKind
 from holdfast.bookings.domain.periods import Period
 from holdfast.bookings.repositories import bookings
-from holdfast.bookings.repositories.records import JobRecord
+from holdfast.bookings.services.jobs import JobKind
+from holdfast.messaging.records import JobRecord
 
 pytestmark = pytest.mark.anyio
 

@@ -49,7 +49,6 @@ from holdfast.bookings.core.security import (
     hash_refresh_token,
 )
 from holdfast.bookings.domain.bookings import BOOKING_HORIZON_DAYS, BookingStatus, price_for
-from holdfast.bookings.domain.jobs import JobKind, JobStatus
 from holdfast.bookings.domain.locations import Location, LocationDetails, OpeningHours, Weekday
 from holdfast.bookings.domain.memberships import Role
 from holdfast.bookings.domain.organisations import OrganisationDetails
@@ -60,10 +59,11 @@ from holdfast.bookings.repositories import locations, organisations, resources
 from holdfast.bookings.repositories.records import (
     Base,
     BookingRecord,
-    JobRecord,
     MembershipRecord,
     UserRecord,
 )
+from holdfast.bookings.services.jobs import JobKind
+from holdfast.messaging.records import JobRecord, JobStatus
 
 LOCAL_DATABASE_URL = "postgresql+asyncpg://holdfast:holdfast@127.0.0.1:54320/holdfast"
 """The Compose database, where compose.yaml publishes it on this machine."""

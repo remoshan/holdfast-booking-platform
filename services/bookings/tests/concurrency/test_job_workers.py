@@ -16,8 +16,9 @@ from sqlalchemy import select, update
 
 from holdfast.bookings.core.mail import Mailer
 from holdfast.bookings.domain.reminders import REMINDER_LEAD
-from holdfast.bookings.repositories.records import JobRecord
-from holdfast.bookings.services.jobs import run_next_job
+from holdfast.bookings.services import jobs
+from holdfast.messaging.jobs import run_next_job
+from holdfast.messaging.records import JobRecord
 
 pytestmark = pytest.mark.anyio
 
@@ -47,7 +48,7 @@ async def test_racing_workers_run_each_job_exactly_once(
 
     async def work() -> int:
         jobs_run = 0
-        while await run_next_job(app.state.sessions, mailer, now):
+        while await run_next_job(app.state.sessions, jobs.handlers(mailer), now):
             jobs_run += 1
         return jobs_run
 
