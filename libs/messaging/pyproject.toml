@@ -1,0 +1,58 @@
+[project]
+name = "holdfast-messaging"
+version = "0.1.0"
+description = "Holdfast's messaging library: the job queue every service runs, and the outbox and inbox that carry messages between services over RabbitMQ."
+license = "MIT"
+authors = [{ name = "Francis Remoshan" }]
+requires-python = ">=3.14"
+dependencies = [
+    "aio-pika>=10.2.3",
+    "asyncpg>=0.32.0",
+    "pydantic>=2.14.2",
+    "sqlalchemy[asyncio]>=2.1.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# One part of the holdfast namespace package, like every service.
+module-name = "holdfast.messaging"
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests"]
+mypy_path = ["src"]
+explicit_package_bases = true
+
+[tool.importlinter]
+# The services are roots too, so that the last contract can name them: seen from the library
+# alone, they are parts of an external namespace that import-linter cannot see into.
+root_packages = ["holdfast.messaging", "holdfast.bookings"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Modules only import the modules below them"
+type = "layers"
+layers = [
+    "holdfast.messaging.worker",
+    "holdfast.messaging.inbox",
+    "holdfast.messaging.outbox | holdfast.messaging.jobs",
+    "holdfast.messaging.records | holdfast.messaging.envelope",
+]
+
+[[tool.importlinter.contracts]]
+name = "The library knows nothing of the services that use it"
+type = "forbidden"
+source_modules = ["holdfast.messaging"]
+forbidden_modules = ["holdfast.bookings"]
+
+[tool.pytest]
+strict = true
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+# Lets tests and fixtures import what they share from tests.support.
+pythonpath = ["."]
+filterwarnings = ["error"]

@@ -1,9 +1,10 @@
-# A uv workspace with one project per service, each in its own folder under services/. Every
-# service keeps its own dependencies and its own type-check, import-rule and test settings; the
-# development tools and the lint and format rules below are shared by all of them.
+# A uv workspace with one project per service, each in its own folder under services/, and the
+# libraries they share under libs/. Every member keeps its own dependencies and its own
+# type-check, import-rule and test settings; the development tools and the lint and format rules
+# below are shared by all of them.
 
 [tool.uv.workspace]
-members = ["services/*"]
+members = ["services/*", "libs/*"]
 
 [dependency-groups]
 dev = [
@@ -20,8 +21,8 @@ dev = [
 line-length = 100
 # The workspace root has no requires-python for Ruff to read it from.
 target-version = "py314"
-# Each service's own packages, such as holdfast and the scripts its tests import, are first-party.
-src = ["services/*", "services/*/src"]
+# Every member's own packages, such as holdfast and the scripts that tests import, are first-party.
+src = ["services/*", "services/*/src", "libs/*", "libs/*/src"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "B", "S", "C4", "SIM", "PT", "ASYNC", "RUF"]

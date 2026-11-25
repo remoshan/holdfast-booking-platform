@@ -27,7 +27,8 @@ repos:
         entry: uv run ruff format
         language: system
         types_or: [python, pyi]
-      # Each service type-checks and checks its import rules from its own folder; make runs them all.
+      # Each workspace member type-checks and checks its import rules from its own folder;
+      # make runs them all.
       - id: mypy
         name: mypy
         entry: make typecheck
