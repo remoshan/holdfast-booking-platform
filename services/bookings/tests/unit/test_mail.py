@@ -40,6 +40,7 @@ def test_the_sender_is_one_address(mail_from: str, address: tuple[str, str]) -> 
         smtp_host="localhost",
         smtp_port=25,
         mail_from=mail_from,
+        rabbitmq_url="amqp://holdfast:holdfast@localhost:5672/",
     )
 
     assert getaddresses([settings.sender]) == [address]
@@ -123,6 +124,7 @@ def test_the_workers_session_limit_outlasts_the_longest_send(
         smtp_host="localhost",
         smtp_port=25,
         mail_from="Holdfast <reminders@example.com>",
+        rabbitmq_url="amqp://holdfast:holdfast@localhost:5672/",
     )
 
     asyncio.run(worker.run_worker(settings, asyncio.Event()))
@@ -130,7 +132,7 @@ def test_the_workers_session_limit_outlasts_the_longest_send(
     session_limit_seconds = idle_in_transaction_limit(passed["longest_job"]).total_seconds()
     assert session_limit_seconds > SEND_DEADLINE_SECONDS + SMTP_TIMEOUT_SECONDS
     assert passed["daily"] == [auth.purge_ended_sign_ins]
-    assert passed["messaging"] is None
+    assert (passed["messaging"].publishes, dict(passed["messaging"].messages)) == (True, {})
 
 
 async def _send_a_reminder(

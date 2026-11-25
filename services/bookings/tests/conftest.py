@@ -16,7 +16,7 @@ from alembic.config import Config
 from argon2 import PasswordHasher, profiles
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
-from sqlalchemy import select, text
+from sqlalchemy import Connection, inspect, select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.container import DockerContainer
@@ -27,7 +27,7 @@ from holdfast.bookings.core.config import ApiSettings
 from holdfast.bookings.core.mail import Mailer
 from holdfast.bookings.main import create_app
 from holdfast.bookings.repositories.records import Base
-from holdfast.messaging.records import JobRecord
+from holdfast.messaging.records import JobRecord, OutboxRecord
 
 POSTGRES_IMAGE = "postgres:18-alpine"
 MAILPIT_IMAGE = "axllent/mailpit:v1.33"
@@ -40,9 +40,6 @@ TIMEZONE = "Europe/Amsterdam"
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 BOOKING_DAYS_AHEAD = 7  # Inside the booking horizon, and never in the past.
 LOCK_WAIT_SECONDS = 10
-EMPTY_ALL_TABLES = text(
-    f"TRUNCATE {', '.join(table.name for table in Base.metadata.sorted_tables)}"
-)
 
 type Json = dict[str, Any]
 type Factory = Callable[..., Awaitable[Json]]
@@ -132,7 +129,15 @@ async def app(database_url: str) -> AsyncIterator[FastAPI]:
     async with app.router.lifespan_context(app):
         yield app
         async with app.state.engine.begin() as connection:
-            await connection.execute(EMPTY_ALL_TABLES)
+            await connection.run_sync(_empty_all_tables)
+
+
+def _empty_all_tables(connection: Connection) -> None:
+    """Empty every table the records describe that exists. A migration test can leave the schema
+    at an older revision, without the newer tables, until its own cleanup rebuilds the schema."""
+    existing = set(inspect(connection).get_table_names())
+    tables = [table.name for table in Base.metadata.sorted_tables if table.name in existing]
+    connection.execute(text(f"TRUNCATE {', '.join(tables)}"))
 
 
 @pytest.fixture
@@ -144,6 +149,18 @@ def stored_jobs(app: FastAPI) -> Callable[[], Awaitable[list[JobRecord]]]:
             return list(await session.scalars(select(JobRecord).order_by(JobRecord.run_at)))
 
     return stored_jobs
+
+
+@pytest.fixture
+def published(app: FastAPI) -> Callable[[], Awaitable[list[tuple[str, Json]]]]:
+    """The events waiting in the outbox, the oldest first, each as its type and data."""
+
+    async def published() -> list[tuple[str, Json]]:
+        async with app.state.sessions() as session:
+            rows = await session.scalars(select(OutboxRecord).order_by(OutboxRecord.id))
+            return [(row.type, row.data) for row in rows]
+
+    return published
 
 
 @pytest.fixture

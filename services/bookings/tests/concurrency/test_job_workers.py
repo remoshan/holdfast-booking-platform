@@ -114,6 +114,8 @@ async def _worker(
         "SMTP_HOST": smtp_host,
         "SMTP_PORT": str(smtp_port),
         "MAIL_FROM": mailer.sender,
+        # Nothing listens there: the worker's jobs need no broker.
+        "RABBITMQ_URL": "amqp://holdfast:holdfast@127.0.0.1:1/",
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "holdfast.bookings.worker", env=os.environ | settings

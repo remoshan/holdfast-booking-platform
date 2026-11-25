@@ -23,7 +23,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from holdfast.bookings.domain.bookings import INACTIVE_STATUSES, BookingStatus
 from holdfast.bookings.domain.memberships import Role
 from holdfast.bookings.domain.resources import ResourceKind
-from holdfast.messaging.records import NAMING_CONVENTION, JobRecord, add_tables_to
+from holdfast.messaging.records import NAMING_CONVENTION, JobRecord, OutboxRecord, add_tables_to
 
 ACTIVE_BOOKING = "status NOT IN ({})".format(
     ", ".join(f"'{status}'" for status in sorted(INACTIVE_STATUSES))
@@ -182,6 +182,6 @@ class BookingRecord(EntityRecord):
     idempotency_key: Mapped[str | None] = mapped_column(String(255))
 
 
-# The job queue's table belongs to the messaging library. It lives in this database, so the
-# migrations, the schema test and the tests' cleanup must see it as part of it.
-add_tables_to(Base.metadata, JobRecord)
+# The job queue's and the outbox's tables belong to the messaging library. They live in this
+# database, so the migrations, the schema test and the tests' cleanup must see them as part of it.
+add_tables_to(Base.metadata, JobRecord, OutboxRecord)

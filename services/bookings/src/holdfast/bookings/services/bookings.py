@@ -21,7 +21,7 @@ from holdfast.bookings.domain.memberships import Membership
 from holdfast.bookings.domain.pagination import Page
 from holdfast.bookings.domain.periods import Period
 from holdfast.bookings.repositories import bookings, locations, resources
-from holdfast.bookings.services import jobs
+from holdfast.bookings.services import events, jobs
 from holdfast.bookings.services.permissions import require_membership
 
 
@@ -74,6 +74,7 @@ async def book_resource(
             await jobs.schedule_hold_expiry(session, booking)
         else:
             await jobs.schedule_reminder(session, booking, now)
+            await events.publish_confirmed(session, booking)
         return booking
 
 
@@ -123,6 +124,7 @@ async def confirm_booking(
         if booking.status is BookingStatus.HELD:
             await bookings.save_status(session, confirmed)
             await jobs.schedule_reminder(session, confirmed, now)
+            await events.publish_confirmed(session, confirmed)
         return confirmed
 
 
@@ -133,7 +135,9 @@ async def cancel_booking(
         membership = await require_membership(session, organisation_id, actor_id)
         booking = await _visible_booking(session, membership, booking_id, for_update=True)
         cancelled = booking.cancel(now=datetime.now(UTC))
-        await bookings.save_status(session, cancelled)
+        if cancelled.status is not booking.status:
+            await bookings.save_status(session, cancelled)
+            await events.publish_cancelled(session, cancelled)
         return cancelled
 
 

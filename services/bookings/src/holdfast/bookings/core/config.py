@@ -3,7 +3,7 @@ needs, so the worker never holds the key that signs access tokens."""
 
 from email.headerregistry import Address
 
-from pydantic import Field, NameEmail, PostgresDsn, SecretStr
+from pydantic import AmqpDsn, Field, NameEmail, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +22,8 @@ class ApiSettings(DatabaseSettings):
 
 
 class WorkerSettings(DatabaseSettings):
+    rabbitmq_url: AmqpDsn
+    """The broker the worker publishes the service's events to, e.g. amqp://user:pass@host:5672/."""
     smtp_host: str = Field(min_length=1)
     """Mail server that relays reminder emails, such as a local Mailpit."""
     smtp_port: int = Field(ge=1, le=65535)

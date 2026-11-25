@@ -1,5 +1,5 @@
-"""The booking service's worker: runs the service's jobs, and ended sign-ins' cleanup once a day,
-until stopped.
+"""The booking service's worker: runs the service's jobs, publishes the events its changes leave in
+the outbox, and cleans up ended sign-ins once a day, until stopped.
 
 Run it with `python -m holdfast.bookings.worker`. Any number of workers can run side by side.
 """
@@ -11,6 +11,7 @@ from holdfast.bookings.core.config import WorkerSettings
 from holdfast.bookings.core.mail import SEND_DEADLINE_SECONDS, Mailer
 from holdfast.bookings.services import auth, jobs
 from holdfast.messaging import worker as messaging_worker
+from holdfast.messaging.worker import Messaging
 
 LONGEST_JOB = timedelta(seconds=SEND_DEADLINE_SECONDS)
 """A reminder whose send is cut off at its deadline. The limit on how long Postgres lets one of
@@ -24,7 +25,10 @@ async def run_worker(settings: WorkerSettings, stopping: asyncio.Event) -> None:
         jobs=jobs.handlers(mailer),
         longest_job=LONGEST_JOB,
         daily=[auth.purge_ended_sign_ins],
-        messaging=None,
+        # The service only publishes so far: it receives nothing, so its queue stays unused.
+        messaging=Messaging(
+            str(settings.rabbitmq_url), queue="bookings", messages={}, publishes=True
+        ),
         stopping=stopping,
     )
 

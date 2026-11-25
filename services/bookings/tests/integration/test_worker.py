@@ -38,8 +38,10 @@ WAIT_SECONDS = 10
 
 @pytest.fixture
 def worker_settings(database_url: str, mailer: Mailer) -> WorkerSettings:
+    """Nothing listens at the broker's address: the worker's jobs and chores need none."""
     return WorkerSettings(
         database_url=database_url,
+        rabbitmq_url="amqp://holdfast:holdfast@127.0.0.1:1/",
         smtp_host=mailer.host,
         smtp_port=mailer.port,
         mail_from=mailer.sender,

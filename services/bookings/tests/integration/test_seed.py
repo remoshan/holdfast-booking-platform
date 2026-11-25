@@ -14,6 +14,8 @@ async def test_seed_fills_every_table_with_data_the_api_can_use(
 ) -> None:
     counts = await seed.seed(database_url, organisation_count=2, history_days=3)
 
+    # History has nothing left to announce, so the seed publishes no events.
+    assert counts.pop("outbox") == 0
     assert all(counts.values()), counts
     credentials = {"email": "user-00001@example.com", "password": seed.PASSWORD}
     tokens = (await anonymous_client.post("/auth/login", json=credentials)).json()

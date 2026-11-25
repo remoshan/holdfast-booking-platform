@@ -35,6 +35,25 @@ services:
     ports:
       - "127.0.0.1:8025:8025"
 
+  # Carries the messages between services. Its management UI, on this machine only, shows the
+  # queues and the messages waiting in them.
+  rabbitmq:
+    image: rabbitmq:4.4-management-alpine
+    # The node takes its name, and with it the folder its data lives in, from the hostname.
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: holdfast
+      RABBITMQ_DEFAULT_PASS: holdfast
+    ports:
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
   migrate:
     <<: *bookings-image
     command: ["alembic", "upgrade", "head"]
@@ -69,11 +88,17 @@ services:
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
       MAIL_FROM: "Holdfast <reminders@example.com>"
+      RABBITMQ_URL: amqp://holdfast:holdfast@rabbitmq:5672/
     depends_on:
       migrate:
         condition: service_completed_successfully
       mailpit:
         condition: service_started
+      # Started, not healthy: the worker must run its jobs, holds' expiries among them, even while
+      # the broker is down. Its relay connects whenever the broker is there.
+      rabbitmq:
+        condition: service_started
 
 volumes:
   database-data:
+  rabbitmq-data:
