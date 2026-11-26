@@ -1,25 +1,21 @@
-"""The booking service's background jobs: releasing a hold that has run out, and reminding a booker
-of their booking a day before it starts.
+"""The booking service's background jobs: releasing a hold that has run out, and having a booker
+reminded of their booking a day before it starts.
 
 Each job is queued in the transaction of the change that needs it, and the worker runs it later on
-the messaging library's job queue, inside a transaction of its own. Its database work is therefore
-never lost and never applied twice. Only a reminder can go out more than once: after the mail
-server has accepted it, anything that stops the job committing, such as the worker dying, its
-database connection dropping or the server's reply arriving too late, makes the next attempt send
-it again.
+the messaging library's job queue, inside a transaction of its own. Its work, the event it
+publishes included, is therefore never lost and never done twice.
 """
 
 from datetime import datetime
 from enum import StrEnum, auto
-from functools import partial
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from holdfast.bookings.core.mail import Mailer
 from holdfast.bookings.domain.bookings import Booking
-from holdfast.bookings.domain.reminders import compose_reminder, needs_reminder, reminder_time
-from holdfast.bookings.repositories import bookings, locations, memberships, resources, users
+from holdfast.bookings.domain.reminders import needs_reminder, reminder_time
+from holdfast.bookings.repositories import bookings
+from holdfast.bookings.services import events
 from holdfast.messaging.jobs import Handler, Payload, enqueue
 
 
@@ -41,14 +37,6 @@ async def schedule_reminder(session: AsyncSession, booking: Booking, now: dateti
         await enqueue(session, JobKind.SEND_REMINDER, _payload(booking), remind_at)
 
 
-def handlers(mailer: Mailer) -> dict[str, Handler]:
-    """What the worker runs for each kind of job."""
-    return {
-        JobKind.EXPIRE_HOLD: _expire_hold,
-        JobKind.SEND_REMINDER: partial(_send_reminder, mailer),
-    }
-
-
 async def _expire_hold(session: AsyncSession, payload: Payload, now: datetime) -> None:
     booking = await bookings.get(
         session, UUID(payload["organisation_id"]), UUID(payload["booking_id"]), for_update=True
@@ -56,22 +44,19 @@ async def _expire_hold(session: AsyncSession, payload: Payload, now: datetime) -
     await bookings.save_status(session, booking.expire(now))
 
 
-async def _send_reminder(
-    mailer: Mailer, session: AsyncSession, payload: Payload, now: datetime
-) -> None:
-    organisation_id = UUID(payload["organisation_id"])
-    booking = await bookings.get(session, organisation_id, UUID(payload["booking_id"]))
-    if not needs_reminder(booking, now):
-        return
-    # Someone who has left the organisation can no longer see or cancel the booking, and
-    # must not be sent its current details.
-    if await memberships.find(session, organisation_id, booking.user_id) is None:
-        return
-    resource = await resources.get(session, organisation_id, booking.resource_id)
-    location = await locations.get(session, organisation_id, resource.location_id)
-    booker = await users.get(session, booking.user_id)
-    reminder = compose_reminder(booking, resource.name, location)
-    await mailer.send(booker.email, reminder.subject, reminder.body, reminder.message_id)
+async def _send_reminder(session: AsyncSession, payload: Payload, now: datetime) -> None:
+    booking = await bookings.get(
+        session, UUID(payload["organisation_id"]), UUID(payload["booking_id"])
+    )
+    if needs_reminder(booking, now):
+        await events.publish_reminder_due(session, booking)
+
+
+HANDLERS: dict[str, Handler] = {
+    JobKind.EXPIRE_HOLD: _expire_hold,
+    JobKind.SEND_REMINDER: _send_reminder,
+}
+"""What the worker runs for each kind of job."""
 
 
 def _payload(booking: Booking) -> Payload:

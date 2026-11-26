@@ -1,21 +1,10 @@
-"""Reminders: the email a booker gets a day before a confirmed booking starts."""
+"""Reminders: a booker is reminded of a confirmed booking a day before it starts."""
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from holdfast.bookings.domain.bookings import Booking, BookingStatus
-from holdfast.bookings.domain.locations import Location
 
 REMINDER_LEAD = timedelta(hours=24)
-
-
-@dataclass(frozen=True, slots=True)
-class Reminder:
-    subject: str
-    body: str
-    message_id: str
-    """The same for every attempt to send it. A worker that dies after the mail server accepted
-    the email sends it again, and mail clients that drop repeated message ids show it once."""
 
 
 def reminder_time(booking: Booking, now: datetime) -> datetime | None:
@@ -28,25 +17,3 @@ def reminder_time(booking: Booking, now: datetime) -> datetime | None:
 def needs_reminder(booking: Booking, now: datetime) -> bool:
     """A booking still needs its reminder while it is confirmed and has not started."""
     return booking.status is BookingStatus.CONFIRMED and now < booking.period.start
-
-
-def compose_reminder(booking: Booking, resource_name: str, location: Location) -> Reminder:
-    """The reminder for a booking, with its times on the location's clock."""
-    start = booking.period.start.astimezone(location.timezone)
-    end = booking.period.end.astimezone(location.timezone)
-    # A name may contain line breaks, but an email header must stay on one line.
-    resource_name = " ".join(resource_name.split())
-    body = (
-        "Hello,\n\n"
-        "This is a reminder of your booking:\n\n"
-        f"  {resource_name}\n"
-        f"  {location.name}, {location.address}\n"
-        f"  {start:%A %d %B %Y}, {start:%H:%M} to {end:%H:%M} ({location.timezone.key} time)\n\n"
-        "If you no longer need it, please cancel it so that someone else can book it.\n\n"
-        "Holdfast\n"
-    )
-    return Reminder(
-        subject=f"Reminder: {resource_name}, {start:%a %d %b} at {start:%H:%M}",
-        body=body,
-        message_id=f"<reminder.{booking.id}@holdfast>",
-    )

@@ -17,7 +17,7 @@ a server that stops answering before it accepts the email fails the attempt."""
 SEND_DEADLINE_SECONDS = 60
 """How long a send may run before it is cut off. A server that keeps answering, but slowly, never
 trips the timeout above; without a deadline it could hold the worker, and every job due after
-the reminder, for ever. Connecting cannot be cut short, but it times out for each address the
+the email, for ever. Connecting cannot be cut short, but it times out for each address the
 host resolves to. The worker's idle-in-transaction limit is derived from this value."""
 
 # SMTP may carry 8-bit text only to a server that offers 8BITMIME, and smtplib asks for that
@@ -41,9 +41,9 @@ class Mailer:
         message["Date"] = formatdate(usegmt=True)
         message["Message-ID"] = message_id
         message.set_content(body)
-        await asyncio.to_thread(self._send, message)
+        await asyncio.to_thread(self._send, message, recipient)
 
-    def _send(self, message: EmailMessage) -> None:
+    def _send(self, message: EmailMessage, recipient: str) -> None:
         smtp = smtplib.SMTP(timeout=SMTP_TIMEOUT_SECONDS)
         finished = threading.Event()
         threading.Thread(target=_hang_up_at_deadline, args=(smtp, finished)).start()
@@ -51,7 +51,10 @@ class Mailer:
             code, reply = smtp.connect(self.host, self.port)
             if code != 220:
                 raise smtplib.SMTPConnectError(code, reply)
-            smtp.send_message(message)
+            # The recipient goes to the server as given. Left to read it from the To header,
+            # smtplib would get the header parser's version, which decodes RFC 2047 encoded words
+            # even inside an address: =?utf-8?q?ada?=@example.com would reach ada@example.com.
+            smtp.send_message(message, to_addrs=[recipient])
             # The server has accepted the email, so nothing after this may fail the attempt, or
             # the job would send the email again. That rules out a `with` block, whose exit
             # raises when QUIT gets any reply but 221. quit() ignores the reply, and suppress()

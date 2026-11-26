@@ -16,6 +16,7 @@ from holdfast.messaging import outbox
 
 BOOKING_CONFIRMED = "bookings.booking_confirmed"
 BOOKING_CANCELLED = "bookings.booking_cancelled"
+REMINDER_DUE = "bookings.reminder_due"
 
 
 class BookingDetails(BaseModel):
@@ -43,6 +44,10 @@ class BookingCancelled(BookingDetails):
     pass
 
 
+class ReminderDue(BookingDetails):
+    pass
+
+
 async def publish_confirmed(session: AsyncSession, booking: Booking) -> None:
     """Announce that a booking was confirmed: at once if it is free, once paid if not."""
     details = await _details(session, booking)
@@ -58,6 +63,13 @@ async def publish_cancelled(session: AsyncSession, booking: Booking) -> None:
     details = await _details(session, booking)
     if details is not None:
         await outbox.publish(session, BOOKING_CANCELLED, BookingCancelled(**details.model_dump()))
+
+
+async def publish_reminder_due(session: AsyncSession, booking: Booking) -> None:
+    """Announce that the booker is due their reminder of the booking."""
+    details = await _details(session, booking)
+    if details is not None:
+        await outbox.publish(session, REMINDER_DUE, ReminderDue(**details.model_dump()))
 
 
 async def _details(session: AsyncSession, booking: Booking) -> BookingDetails | None:

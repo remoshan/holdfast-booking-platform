@@ -1,6 +1,7 @@
-"""The booking service's jobs, which release holds that ran out and send reminders, and its worker,
-which also deletes ended sign-ins. Most tests run jobs as the worker does, with the clock set to
-when they fall due. The job queue itself is tested with the messaging library."""
+"""The booking service's jobs, which release holds that ran out and have bookers reminded of their
+bookings, and its worker, which also deletes ended sign-ins. Most tests run jobs as the worker
+does, with the clock set to when they fall due. The job queue itself is tested with the messaging
+library."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -15,7 +16,6 @@ from sqlalchemy import func, select
 
 from holdfast.bookings import worker
 from holdfast.bookings.core.config import WorkerSettings
-from holdfast.bookings.core.mail import Mailer
 from holdfast.bookings.domain.reminders import REMINDER_LEAD
 from holdfast.bookings.repositories import bookings
 from holdfast.bookings.repositories.records import RefreshTokenRecord
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.anyio
 
 type Json = dict[str, Any]
 type Book = Callable[..., Awaitable[Response]]
-type Inbox = Callable[[], Awaitable[list[Json]]]
+type Published = Callable[[], Awaitable[list[tuple[str, Json]]]]
 type StoredJobs = Callable[[], Awaitable[list[JobRecord]]]
 type Wait = Callable[[], Awaitable[None]]
 
@@ -37,14 +37,10 @@ WAIT_SECONDS = 10
 
 
 @pytest.fixture
-def worker_settings(database_url: str, mailer: Mailer) -> WorkerSettings:
+def worker_settings(database_url: str) -> WorkerSettings:
     """Nothing listens at the broker's address: the worker's jobs and chores need none."""
     return WorkerSettings(
-        database_url=database_url,
-        rabbitmq_url="amqp://holdfast:holdfast@127.0.0.1:1/",
-        smtp_host=mailer.host,
-        smtp_port=mailer.port,
-        mail_from=mailer.sender,
+        database_url=database_url, rabbitmq_url="amqp://holdfast:holdfast@127.0.0.1:1/"
     )
 
 
@@ -54,7 +50,6 @@ async def test_a_hold_that_runs_out_expires_and_frees_its_slot(
     organisation: Json,
     resource: Json,
     book: Book,
-    mailer: Mailer,
     booking_day: date,
     at: Callable[..., str],
 ) -> None:
@@ -62,7 +57,7 @@ async def test_a_hold_that_runs_out_expires_and_frees_its_slot(
 
     ran = await run_next_job(
         app.state.sessions,
-        job_service.handlers(mailer),
+        job_service.HANDLERS,
         datetime.fromisoformat(held["hold_expires_at"]),
     )
 
@@ -83,12 +78,12 @@ async def test_a_hold_that_runs_out_expires_and_frees_its_slot(
 
 
 async def test_a_job_waits_until_it_is_due(
-    app: FastAPI, client: AsyncClient, organisation: Json, book: Book, mailer: Mailer
+    app: FastAPI, client: AsyncClient, organisation: Json, book: Book
 ) -> None:
     held = (await book("09:00", "10:00")).json()
     just_before = datetime.fromisoformat(held["hold_expires_at"]) - timedelta(microseconds=1)
 
-    ran = await run_next_job(app.state.sessions, job_service.handlers(mailer), just_before)
+    ran = await run_next_job(app.state.sessions, job_service.HANDLERS, just_before)
 
     booking = await client.get(f"/organisations/{organisation['id']}/bookings/{held['id']}")
     assert not ran
@@ -96,12 +91,7 @@ async def test_a_job_waits_until_it_is_due(
 
 
 async def test_a_hold_confirmed_in_time_does_not_expire(
-    app: FastAPI,
-    client: AsyncClient,
-    organisation: Json,
-    book: Book,
-    mailer: Mailer,
-    stored_jobs: StoredJobs,
+    app: FastAPI, client: AsyncClient, organisation: Json, book: Book, stored_jobs: StoredJobs
 ) -> None:
     held = (await book("09:00", "10:00")).json()
     path = f"/organisations/{organisation['id']}/bookings/{held['id']}"
@@ -109,7 +99,7 @@ async def test_a_hold_confirmed_in_time_does_not_expire(
 
     await run_next_job(
         app.state.sessions,
-        job_service.handlers(mailer),
+        job_service.HANDLERS,
         datetime.fromisoformat(held["hold_expires_at"]),
     )
 
@@ -122,7 +112,6 @@ async def test_a_hold_confirmed_while_its_expiry_job_runs_stays_confirmed(
     client: AsyncClient,
     organisation: Json,
     book: Book,
-    mailer: Mailer,
     stored_jobs: StoredJobs,
     until_a_query_waits_for_a_lock: Wait,
 ) -> None:
@@ -135,7 +124,7 @@ async def test_a_hold_confirmed_while_its_expiry_job_runs_stays_confirmed(
             confirming, UUID(organisation["id"]), UUID(held["id"]), for_update=True
         )
         expiring = asyncio.create_task(
-            run_next_job(app.state.sessions, job_service.handlers(mailer), hold_expires_at)
+            run_next_job(app.state.sessions, job_service.HANDLERS, hold_expires_at)
         )
         await until_a_query_waits_for_a_lock()
         just_in_time = hold_expires_at - timedelta(seconds=1)
@@ -177,27 +166,24 @@ async def test_confirming_or_cancelling_while_a_hold_expires_waits_and_finds_it_
     assert (await client.get(path)).json()["status"] == "expired"
 
 
-async def test_a_confirmed_booking_is_reminded_by_email_a_day_before_it_starts(
+async def test_a_confirmed_booking_is_reminded_a_day_before_it_starts(
     app: FastAPI,
     book: Book,
     free_resource: Json,
     user: Json,
-    mailer: Mailer,
-    inbox: Inbox,
     stored_jobs: StoredJobs,
+    published: Published,
 ) -> None:
     booking = (await book("09:00", "10:30", resource_id=free_resource["id"])).json()
     remind_at = datetime.fromisoformat(booking["start"]) - REMINDER_LEAD
     [reminder] = await stored_jobs()
 
-    ran = await run_next_job(app.state.sessions, job_service.handlers(mailer), remind_at)
+    ran = await run_next_job(app.state.sessions, job_service.HANDLERS, remind_at)
 
-    [email] = await inbox()
+    [reminder_due] = await _reminders_due(published)
     assert ran
     assert (reminder.kind, reminder.run_at) == (JobKind.SEND_REMINDER, remind_at)
-    assert [recipient["Address"] for recipient in email["To"]] == [user["email"]]
-    assert email["Subject"].startswith("Reminder: Desk 1, ")
-    assert email["MessageID"] == f"reminder.{booking['id']}@holdfast"
+    assert (reminder_due["booking_id"], reminder_due["recipient"]) == (booking["id"], user["email"])
     assert await stored_jobs() == []
 
 
@@ -207,21 +193,20 @@ async def test_a_cancelled_booking_gets_no_reminder(
     organisation: Json,
     book: Book,
     free_resource: Json,
-    mailer: Mailer,
-    inbox: Inbox,
     stored_jobs: StoredJobs,
+    published: Published,
 ) -> None:
     booking = (await book("09:00", "10:00", resource_id=free_resource["id"])).json()
     await client.post(f"/organisations/{organisation['id']}/bookings/{booking['id']}/cancel")
 
     ran = await run_next_job(
         app.state.sessions,
-        job_service.handlers(mailer),
+        job_service.HANDLERS,
         datetime.fromisoformat(booking["start"]) - REMINDER_LEAD,
     )
 
     assert ran
-    assert await inbox() == []
+    assert await _reminders_due(published) == []
     assert await stored_jobs() == []
 
 
@@ -232,9 +217,8 @@ async def test_a_booker_who_has_left_the_organisation_gets_no_reminder(
     book: Book,
     free_resource: Json,
     add_member: Callable[..., Awaitable[Json]],
-    mailer: Mailer,
-    inbox: Inbox,
     stored_jobs: StoredJobs,
+    published: Published,
 ) -> None:
     member = await add_member(organisation["id"], "member")
     booking = (
@@ -244,12 +228,12 @@ async def test_a_booker_who_has_left_the_organisation_gets_no_reminder(
 
     ran = await run_next_job(
         app.state.sessions,
-        job_service.handlers(mailer),
+        job_service.HANDLERS,
         datetime.fromisoformat(booking["start"]) - REMINDER_LEAD,
     )
 
     assert ran
-    assert await inbox() == []
+    assert await _reminders_due(published) == []
     assert await stored_jobs() == []
 
 
@@ -281,6 +265,10 @@ async def _run_worker_until(settings: WorkerSettings, done: Callable[[], Awaitab
     finally:
         stopping.set()
         await running
+
+
+async def _reminders_due(published: Published) -> list[Json]:
+    return [data for event_type, data in await published() if event_type == "bookings.reminder_due"]
 
 
 async def _count_refresh_tokens(app: FastAPI) -> int:

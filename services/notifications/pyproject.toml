@@ -1,0 +1,66 @@
+[project]
+name = "holdfast-notifications"
+version = "0.1.0"
+description = "Holdfast's notifications service: emails each booker about their bookings, from the booking service's events."
+license = "MIT"
+authors = [{ name = "Francis Remoshan" }]
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "email-validator>=2.3.0",
+    "holdfast-messaging",
+    "pydantic>=2.14.2",
+    "pydantic-settings>=2.16.2",
+    "sqlalchemy[asyncio]>=2.1.6",
+    "tzdata>=2026.6",
+]
+
+[tool.uv.sources]
+holdfast-messaging = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Every service is one part of the holdfast namespace package, so there is no holdfast/__init__.py.
+module-name = "holdfast.notifications"
+
+[tool.alembic]
+# Relative to this file, not to the folder Alembic runs in.
+script_location = "%(here)s/migrations"
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests", "migrations"]
+mypy_path = ["src"]
+explicit_package_bases = true
+
+[tool.importlinter]
+# The other parts of the holdfast namespace are roots too, so that contracts can name them.
+root_packages = ["holdfast.notifications", "holdfast.messaging", "holdfast.bookings"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Modules only import the modules below them"
+type = "layers"
+layers = [
+    "holdfast.notifications.worker",
+    "holdfast.notifications.handlers",
+    "holdfast.notifications.emails | holdfast.notifications.mail",
+    "holdfast.notifications.events",
+]
+
+[[tool.importlinter.contracts]]
+name = "The service knows no other service"
+type = "forbidden"
+source_modules = ["holdfast.notifications"]
+forbidden_modules = ["holdfast.bookings"]
+
+[tool.pytest]
+strict = true
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+filterwarnings = ["error"]

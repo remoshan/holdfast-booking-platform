@@ -8,22 +8,17 @@ import asyncio
 from datetime import timedelta
 
 from holdfast.bookings.core.config import WorkerSettings
-from holdfast.bookings.core.mail import SEND_DEADLINE_SECONDS, Mailer
 from holdfast.bookings.services import auth, jobs
 from holdfast.messaging import worker as messaging_worker
 from holdfast.messaging.worker import Messaging
 
-LONGEST_JOB = timedelta(seconds=SEND_DEADLINE_SECONDS)
-"""A reminder whose send is cut off at its deadline. The limit on how long Postgres lets one of
-the worker's sessions sit idle in a transaction is derived from it."""
-
 
 async def run_worker(settings: WorkerSettings, stopping: asyncio.Event) -> None:
-    mailer = Mailer(settings.smtp_host, settings.smtp_port, settings.sender)
     await messaging_worker.run_worker(
         database_url=str(settings.database_url),
-        jobs=jobs.handlers(mailer),
-        longest_job=LONGEST_JOB,
+        jobs=jobs.HANDLERS,
+        # The jobs wait on nothing but the database.
+        longest_job=timedelta(0),
         daily=[auth.purge_ended_sign_ins],
         # The service only publishes so far: it receives nothing, so its queue stays unused.
         messaging=Messaging(

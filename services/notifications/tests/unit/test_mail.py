@@ -14,13 +14,11 @@ from typing import Any
 
 import pytest
 
-from holdfast.bookings import worker
-from holdfast.bookings.core import mail
-from holdfast.bookings.core.config import WorkerSettings
-from holdfast.bookings.core.mail import SEND_DEADLINE_SECONDS, SMTP_TIMEOUT_SECONDS, Mailer
-from holdfast.bookings.services import auth
 from holdfast.messaging import worker as messaging_worker
 from holdfast.messaging.worker import idle_in_transaction_limit
+from holdfast.notifications import mail, worker
+from holdfast.notifications.config import WorkerSettings
+from holdfast.notifications.mail import SEND_DEADLINE_SECONDS, SMTP_TIMEOUT_SECONDS, Mailer
 
 type Conversation = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
@@ -28,8 +26,8 @@ type Conversation = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Await
 @pytest.mark.parametrize(
     ("mail_from", "address"),
     [
-        ('"Acme, Inc." <reminders@acme.example>', ("Acme, Inc.", "reminders@acme.example")),
-        ("Holdfast <reminders@b\u00fccher.example>", ("Holdfast", "reminders@b\u00fccher.example")),
+        ('"Acme, Inc." <bookings@acme.example>', ("Acme, Inc.", "bookings@acme.example")),
+        ("Holdfast <bookings@b\u00fccher.example>", ("Holdfast", "bookings@b\u00fccher.example")),
         ("Holdfast <r\u00e9minders@example.com>", ("Holdfast", "r\u00e9minders@example.com")),
     ],
     ids=["a comma in the name", "an internationalised domain", "a non-ASCII local part"],
@@ -47,7 +45,7 @@ def test_the_sender_is_one_address(mail_from: str, address: tuple[str, str]) -> 
 
 
 def test_every_email_carries_the_date_it_was_sent() -> None:
-    [accepted] = asyncio.run(_send_a_reminder())
+    [accepted] = asyncio.run(_send_an_email())
 
     message = message_from_bytes(accepted)
     assert abs(parsedate_to_datetime(message["Date"]) - datetime.now(UTC)) < timedelta(minutes=1)
@@ -58,10 +56,19 @@ def test_a_body_that_is_not_plain_ascii_is_encoded_for_any_mail_server() -> None
     only when an address needs SMTPUTF8."""
     body = "Caf\u00e9 Z\u00fcrich, from 09:00 to 10:00"
 
-    [accepted] = asyncio.run(_send_a_reminder(body=body))
+    [accepted] = asyncio.run(_send_an_email(body=body))
 
     assert accepted.isascii()
     assert message_from_bytes(accepted, policy=policy.default).get_content().splitlines() == [body]
+
+
+def test_an_address_that_looks_like_an_encoded_word_gets_the_email_itself() -> None:
+    """The To header's parser decodes RFC 2047 encoded words even inside an address, where the RFC
+    forbids them. Had smtplib taken the recipient from that header, this email would have gone to
+    ada@example.com."""
+    recipient = "=?utf-8?q?ada?=@example.com"
+
+    assert asyncio.run(_envelope_recipients(recipient)) == [recipient]
 
 
 @pytest.mark.parametrize(
@@ -69,16 +76,16 @@ def test_a_body_that_is_not_plain_ascii_is_encoded_for_any_mail_server() -> None
 )
 def test_an_email_the_server_accepted_counts_as_sent_whatever_follows(quit_reply: bytes) -> None:
     """Otherwise the job would fail, and its next attempt would send the email again."""
-    accepted = asyncio.run(_send_a_reminder(quit_reply=quit_reply))
+    accepted = asyncio.run(_send_an_email(quit_reply=quit_reply))
 
     assert len(accepted) == 1
 
 
 @pytest.mark.parametrize("data_reply", [b"554 Rejected\r\n", b""], ids=["a refusal", "a hang-up"])
 def test_an_email_the_server_did_not_accept_fails_the_attempt(data_reply: bytes) -> None:
-    """So the job tries again later, instead of losing the reminder."""
+    """So the job tries again later, instead of losing the email."""
     with pytest.raises(smtplib.SMTPException):
-        asyncio.run(_send_a_reminder(data_reply=data_reply))
+        asyncio.run(_send_an_email(data_reply=data_reply))
 
 
 @pytest.mark.parametrize(
@@ -111,7 +118,7 @@ def test_the_workers_session_limit_outlasts_the_longest_send(
 ) -> None:
     """A send ends at its deadline, or on Windows once the server next sends something, within
     the SMTP timeout. If Postgres ended the worker's idle session sooner, the attempt would go
-    unrecorded and the reminder would be sent again and again. The messaging library derives the
+    unrecorded and the email would be sent again and again. The messaging library derives the
     limit from what the worker tells it, so that is what this reads."""
     passed: dict[str, Any] = {}
 
@@ -123,7 +130,7 @@ def test_the_workers_session_limit_outlasts_the_longest_send(
         database_url="postgresql+asyncpg://holdfast:holdfast@localhost/holdfast",
         smtp_host="localhost",
         smtp_port=25,
-        mail_from="Holdfast <reminders@example.com>",
+        mail_from="Holdfast <bookings@example.com>",
         rabbitmq_url="amqp://holdfast:holdfast@localhost:5672/",
     )
 
@@ -131,17 +138,15 @@ def test_the_workers_session_limit_outlasts_the_longest_send(
 
     session_limit_seconds = idle_in_transaction_limit(passed["longest_job"]).total_seconds()
     assert session_limit_seconds > SEND_DEADLINE_SECONDS + SMTP_TIMEOUT_SECONDS
-    assert passed["daily"] == [auth.purge_ended_sign_ins]
-    assert (passed["messaging"].publishes, dict(passed["messaging"].messages)) == (True, {})
 
 
-async def _send_a_reminder(
+async def _send_an_email(
     *,
     body: str = "Body",
     data_reply: bytes = b"250 Accepted\r\n",
     quit_reply: bytes = b"221 Bye\r\n",
 ) -> list[bytes]:
-    """Send a reminder to a stand-in mail server, which answers the email with data_reply and QUIT
+    """Send an email to a stand-in mail server, which answers the email with data_reply and QUIT
     with quit_reply, or hangs up in place of an empty reply. Returns the emails it received."""
     received: list[bytes] = []
 
@@ -166,6 +171,32 @@ async def _send_a_reminder(
     return received
 
 
+async def _envelope_recipients(recipient: str) -> list[str]:
+    """Send an email to the recipient through a stand-in mail server that accepts it. Returns the
+    addresses that the client's RCPT TO commands named."""
+    named: list[str] = []
+
+    async def converse(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"220 Ready\r\n")
+        while line := await reader.readline():
+            command = line.upper()
+            if command.startswith(b"RCPT TO:"):
+                named.append(line[len(b"RCPT TO:") :].strip().decode().strip("<>"))
+            if command.startswith(b"DATA"):
+                writer.write(b"354 Go ahead\r\n")
+                await reader.readuntil(b"\r\n.\r\n")
+                writer.write(b"250 Accepted\r\n")
+            elif command.startswith(b"QUIT"):
+                writer.write(b"221 Bye\r\n")
+                break
+            else:
+                writer.write(b"250 OK\r\n")
+        writer.close()
+
+    await _send_through(converse, recipient=recipient)
+    return named
+
+
 async def _drag_out_the_greeting(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
@@ -180,10 +211,12 @@ async def _drag_out_the_greeting(
     writer.close()
 
 
-async def _send_through(conversation: Conversation, body: str = "Body") -> None:
-    """Send a reminder through the real smtplib to a stand-in mail server that holds the given
+async def _send_through(
+    conversation: Conversation, body: str = "Body", recipient: str = "ada@example.com"
+) -> None:
+    """Send an email through the real smtplib to a stand-in mail server that holds the given
     conversation."""
     async with await asyncio.start_server(conversation, "127.0.0.1", 0) as server:
         host, port = server.sockets[0].getsockname()
-        mailer = Mailer(host, port, "Holdfast <reminders@example.com>")
-        await mailer.send("ada@example.com", "Reminder", body, "<reminder.1@holdfast>")
+        mailer = Mailer(host, port, "Holdfast <bookings@example.com>")
+        await mailer.send(recipient, "Reminder", body, "<reminder.1@holdfast>")

@@ -7,11 +7,25 @@ x-bookings-image: &bookings-image
       SERVICE: bookings
   image: holdfast-bookings:local
 
-x-database-url: &database-url
-  DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@database:5432/holdfast
+x-notifications-image: &notifications-image
+  build:
+    context: .
+    args:
+      SERVICE: notifications
+  image: holdfast-notifications:local
+
+x-bookings-database-url: &bookings-database-url
+  DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@bookings-database:5432/holdfast
+
+x-notifications-database-url: &notifications-database-url
+  DATABASE_URL: postgresql+asyncpg://notifications:notifications@notifications-database:5432/notifications
+
+x-rabbitmq-url: &rabbitmq-url
+  RABBITMQ_URL: amqp://holdfast:holdfast@rabbitmq:5672/
 
 services:
-  database:
+  # Each service has a database of its own, which no other service reads.
+  bookings-database:
     image: postgres:18-alpine
     environment:
       POSTGRES_USER: holdfast
@@ -29,7 +43,22 @@ services:
       timeout: 5s
       retries: 15
 
-  # Catches every email the worker sends; read them in its web interface on this machine.
+  notifications-database:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: notifications
+      POSTGRES_PASSWORD: notifications
+      POSTGRES_DB: notifications
+    volumes:
+      - notifications-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=notifications --dbname=notifications"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  # Catches every email the notifications service sends; read them in its web interface on this
+  # machine.
   mailpit:
     image: axllent/mailpit:v1.33
     ports:
@@ -54,51 +83,75 @@ services:
       timeout: 10s
       retries: 20
 
-  migrate:
+  bookings-migrate:
     <<: *bookings-image
     command: ["alembic", "upgrade", "head"]
     environment:
-      <<: *database-url
+      <<: *bookings-database-url
     depends_on:
-      database:
+      bookings-database:
         condition: service_healthy
 
-  api:
+  bookings-api:
     <<: *bookings-image
     command: ["uvicorn", "holdfast.bookings.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      <<: *database-url
+      <<: *bookings-database-url
       # Local development only. Every deployed environment sets its own random secret.
       JWT_SECRET: local-development-secret-never-used-anywhere-else
     # This machine only: seeded accounts share a published password.
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      migrate:
+      bookings-migrate:
         condition: service_completed_successfully
 
-  worker:
+  bookings-worker:
     <<: *bookings-image
     command: ["python", "-m", "holdfast.bookings.worker"]
-    # Longer than the slowest job, a reminder whose send is cut off at SEND_DEADLINE_SECONDS,
-    # so that `docker compose stop` lets the job in hand finish.
-    stop_grace_period: 2m
+    # Longer than a page of the outbox can wait for RabbitMQ's confirms, so that
+    # `docker compose stop` lets the work in hand finish.
+    stop_grace_period: 30s
     environment:
-      <<: *database-url
-      SMTP_HOST: mailpit
-      SMTP_PORT: 1025
-      MAIL_FROM: "Holdfast <reminders@example.com>"
-      RABBITMQ_URL: amqp://holdfast:holdfast@rabbitmq:5672/
+      <<: [*bookings-database-url, *rabbitmq-url]
     depends_on:
-      migrate:
+      bookings-migrate:
         condition: service_completed_successfully
-      mailpit:
-        condition: service_started
       # Started, not healthy: the worker must run its jobs, holds' expiries among them, even while
       # the broker is down. Its relay connects whenever the broker is there.
       rabbitmq:
         condition: service_started
 
+  notifications-migrate:
+    <<: *notifications-image
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *notifications-database-url
+    depends_on:
+      notifications-database:
+        condition: service_healthy
+
+  notifications-worker:
+    <<: *notifications-image
+    command: ["python", "-m", "holdfast.notifications.worker"]
+    # Longer than the slowest job, an email whose send is cut off at SEND_DEADLINE_SECONDS, so
+    # that `docker compose stop` lets the job in hand finish.
+    stop_grace_period: 2m
+    environment:
+      <<: [*notifications-database-url, *rabbitmq-url]
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      MAIL_FROM: "Holdfast <bookings@example.com>"
+    depends_on:
+      notifications-migrate:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+      # Started, not healthy: the emails already received go out even while the broker is down.
+      rabbitmq:
+        condition: service_started
+
 volumes:
   database-data:
+  notifications-data:
   rabbitmq-data:

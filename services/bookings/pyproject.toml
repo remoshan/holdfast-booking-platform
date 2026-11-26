@@ -43,9 +43,10 @@ mypy_path = ["src"]
 explicit_package_bases = true
 
 [tool.importlinter]
-# The messaging library is a root too, so that contracts can forbid it by name: seen from the
-# booking service alone, it is part of an external namespace that import-linter cannot see into.
-root_packages = ["holdfast.bookings", "holdfast.messaging"]
+# The other parts of the holdfast namespace are roots too, so that contracts can forbid them by
+# name: seen from the booking service alone, they are part of an external namespace that
+# import-linter cannot see into.
+root_packages = ["holdfast.bookings", "holdfast.messaging", "holdfast.notifications"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -80,6 +81,12 @@ forbidden_modules = [
     "sqlalchemy",
     "starlette",
 ]
+
+[[tool.importlinter.contracts]]
+name = "The service knows no other service"
+type = "forbidden"
+source_modules = ["holdfast.bookings"]
+forbidden_modules = ["holdfast.notifications"]
 
 [tool.pytest]
 strict = true

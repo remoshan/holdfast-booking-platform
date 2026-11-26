@@ -1,6 +1,5 @@
 """Fixtures for the suites that run against Postgres: a disposable database migrated to head and
-emptied after every test, signed-in clients, factories for the entities most tests need, and a
-mail catcher for the tests that send email."""
+emptied after every test, signed-in clients, and factories for the entities most tests need."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -19,20 +18,14 @@ from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import Connection, inspect, select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
-from testcontainers.core.container import DockerContainer
-from testcontainers.core.wait_strategies import HttpWaitStrategy
 
 from holdfast.bookings.core import security
 from holdfast.bookings.core.config import ApiSettings
-from holdfast.bookings.core.mail import Mailer
 from holdfast.bookings.main import create_app
 from holdfast.bookings.repositories.records import Base
 from holdfast.messaging.records import JobRecord, OutboxRecord
 
 POSTGRES_IMAGE = "postgres:18-alpine"
-MAILPIT_IMAGE = "axllent/mailpit:v1.33"
-# A display name with a comma must be quoted, or the From header splits into two addresses.
-MAIL_FROM = '"Holdfast, Inc." <reminders@example.com>'
 PYPROJECT_PATH = Path(__file__).parents[1] / "pyproject.toml"
 JWT_SECRET = "a-secret-used-only-by-the-test-suite"
 PASSWORD = "correct horse battery staple"
@@ -83,40 +76,6 @@ def _alembic_config(database_url: str) -> Config:
     config = Config(toml_file=str(PYPROJECT_PATH))
     config.attributes["database_url"] = database_url
     return config
-
-
-@pytest.fixture(scope="session")
-def mailpit() -> Iterator[DockerContainer]:
-    """A mail catcher, started only for the tests that send email."""
-    container = (
-        DockerContainer(MAILPIT_IMAGE)
-        .with_exposed_ports(1025, 8025)
-        .waiting_for(HttpWaitStrategy(8025, "/readyz"))
-    )
-    with container:
-        yield container
-
-
-@pytest.fixture
-def mailer(mailpit: DockerContainer) -> Mailer:
-    """Sends email to the mail catcher."""
-    return Mailer(mailpit.get_container_host_ip(), mailpit.get_exposed_port(1025), MAIL_FROM)
-
-
-@pytest.fixture
-async def inbox(mailpit: DockerContainer) -> AsyncIterator[Callable[[], Awaitable[list[Json]]]]:
-    """Read the emails that arrived during the test, newest first. It starts empty."""
-    api_url = f"http://{mailpit.get_container_host_ip()}:{mailpit.get_exposed_port(8025)}"
-    async with AsyncClient(base_url=api_url) as api:
-        (await api.delete("/api/v1/messages")).raise_for_status()
-
-        async def inbox() -> list[Json]:
-            messages: list[Json] = (
-                (await api.get("/api/v1/messages")).raise_for_status().json()["messages"]
-            )
-            return messages
-
-        yield inbox
 
 
 def _client(app: FastAPI, headers: dict[str, str] | None = None) -> AsyncClient:
