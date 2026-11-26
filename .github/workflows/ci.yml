@@ -31,3 +31,4 @@ jobs:
       - uses: actions/checkout@v7
       - run: docker build --build-arg SERVICE=bookings .
       - run: docker build --build-arg SERVICE=notifications .
+      - run: docker build --build-arg SERVICE=payments .

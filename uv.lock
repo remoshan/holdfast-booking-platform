@@ -11,6 +11,7 @@ members = [
     "holdfast-bookings",
     "holdfast-messaging",
     "holdfast-notifications",
+    "holdfast-payments",
 ]
 
 [manifest.dependency-groups]
@@ -722,6 +723,29 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.16.2" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.6" },
     { name = "tzdata", specifier = ">=2026.6" },
+]
+
+[[package]]
+name = "holdfast-payments"
+version = "0.1.0"
+source = { editable = "services/payments" }
+dependencies = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "holdfast-messaging" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.20.1" },
+    { name = "asyncpg", specifier = ">=0.32.0" },
+    { name = "holdfast-messaging", editable = "libs/messaging" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+    { name = "pydantic-settings", specifier = ">=2.16.2" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.6" },
 ]
 
 [[package]]

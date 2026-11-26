@@ -40,7 +40,12 @@ explicit_package_bases = true
 
 [tool.importlinter]
 # The other parts of the holdfast namespace are roots too, so that contracts can name them.
-root_packages = ["holdfast.notifications", "holdfast.messaging", "holdfast.bookings"]
+root_packages = [
+    "holdfast.notifications",
+    "holdfast.messaging",
+    "holdfast.bookings",
+    "holdfast.payments",
+]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -57,7 +62,7 @@ layers = [
 name = "The service knows no other service"
 type = "forbidden"
 source_modules = ["holdfast.notifications"]
-forbidden_modules = ["holdfast.bookings"]
+forbidden_modules = ["holdfast.bookings", "holdfast.payments"]
 
 [tool.pytest]
 strict = true

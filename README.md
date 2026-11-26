@@ -61,7 +61,7 @@ make up        # build and start the databases, RabbitMQ and Mailpit, run migrat
 
 The API is then available at <http://localhost:8000>, with interactive OpenAPI docs at <http://localhost:8000/docs>. To try it there, register with `POST /auth/register`, log in with `POST /auth/login`, then choose **Authorize** and paste the `access_token`. The emails the notifications service sends, such as booking confirmations and reminders, arrive in Mailpit at <http://localhost:8025>, and RabbitMQ's management UI, at <http://localhost:15672> with `holdfast` as user and password, shows the messages between services. Stop everything with `make down`.
 
-The booking service's Postgres listens on `127.0.0.1:54320` for local tools, with `holdfast` as user, password and database. The uncommon port avoids any other Postgres on your machine, and the server is not reachable from the network. The notifications service's database is reachable only inside Compose: `docker compose exec notifications-database psql -U notifications`.
+The booking service's Postgres listens on `127.0.0.1:54320` for local tools, with `holdfast` as user, password and database. The uncommon port avoids any other Postgres on your machine, and the server is not reachable from the network. The notifications and payments services' databases are reachable only inside Compose: `docker compose exec notifications-database psql -U notifications`, and likewise with `payments`.
 
 ### Commands
 
@@ -88,9 +88,11 @@ Each process reads only the variables it needs: the booking service's worker nev
 | --- | --- | --- |
 | `DATABASE_URL` | All | SQLAlchemy URL with the asyncpg driver, e.g. `postgresql+asyncpg://user:password@host:5432/holdfast`. Each service has a database of its own. |
 | `JWT_SECRET` | Bookings API | Key that signs access tokens: at least 32 random characters, different in every environment. Compose sets a value for local development only. |
-| `RABBITMQ_URL` | Both workers | Broker the booking service publishes its events to and the notifications service receives them from, e.g. `amqp://user:password@host:5672/`; Compose points it at its RabbitMQ |
+| `RABBITMQ_URL` | Every worker | Broker the services' workers exchange their messages through, e.g. `amqp://user:password@host:5672/`; Compose points it at its RabbitMQ |
 | `SMTP_HOST`, `SMTP_PORT` | Notifications worker | Mail server that relays the emails, without TLS or authentication for now; Compose points them at Mailpit |
 | `MAIL_FROM` | Notifications worker | Sender of every email, e.g. `Holdfast <bookings@example.com>` |
+| `PROVIDER_DELAY_SECONDS` | Payments worker | How long the simulated payment provider takes to answer the first call for each booking; 0 by default. A retry is answered at once, from the provider's books, so above the 10-second provider timeout every first call times out after the provider acted, and its retry finds what was done. Compose passes it on from the shell that runs `make up`. |
+| `PROVIDER_FAILURE_RATE` | Payments worker | The share of calls, from 0 to 1, that the simulated provider refuses as unavailable before it does anything; 0 by default. A refused call is retried. Compose passes it on from the shell that runs `make up`. |
 
 ## API
 
@@ -215,13 +217,25 @@ When a booking is confirmed or cancelled, the API also writes an event to the `o
 
 The notifications service's worker, `python -m holdfast.notifications.worker`, receives the events from its own queue, `notifications`, which keeps them while the service is down. It stores each one as a job in its own database, once per event id, before acknowledging it, and the job sends the email. Each email's `Message-ID` is made from its kind and the booking's id, such as `<reminder.{booking id}@holdfast>`, so every attempt to send it carries the same one. The service keeps no booking data: only its jobs and the ids of the events it received in the last seven days.
 
+The payments service's worker, `python -m holdfast.payments.worker`, takes two commands from its own queue, `payments`: `bookings.charge_booking`, to charge a booking its price with the card the booker named, and `bookings.refund_booking`, to refund that charge in full. Nothing sends them yet: the booking service starts to, for held bookings, in the next step of Phase 6. Each command runs as a job that asks the simulated provider, records the answer in the `charges` ledger and publishes the outcome, `payments.charge_succeeded`, `payments.charge_declined` or `payments.charge_refunded`, all in one transaction. The provider is called with the booking's id as its idempotency key, and answers a key it has seen as it did the first time, so a retry after a timeout, a lost answer or a crash finds the charge instead of making a second one (ADR-0012). It keeps its own books, in `provider_charges`, in transactions of its own, as an outside provider would. The card decides the outcome:
+
+| Card | Outcome |
+| --- | --- |
+| `pm_card_ok` | Charged |
+| `pm_card_slow` | Charged, but the first answer comes too late: the attempt times out after 10 seconds, and its retry, 30 seconds later, finds the charge |
+| `pm_card_declined`, or any card the provider does not know | Declined |
+
+`PROVIDER_DELAY_SECONDS` and `PROVIDER_FAILURE_RATE` add slow answers and outages on top, for trying failures out by hand, as with `PROVIDER_FAILURE_RATE=0.5 make up` (see Configuration).
+
 | Service | Job | Queued when | Runs | Does |
 | --- | --- | --- | --- | --- |
 | Bookings | `expire_hold` | A booking that costs something is made | When its hold runs out | Expires the booking if it is still held, freeing its slot |
 | Bookings | `send_reminder` | A booking is confirmed more than a day before it starts | 24 hours before it starts | Publishes `bookings.reminder_due`, unless the booking was cancelled or the booker has left the organisation |
 | Notifications | The event's type | An event arrives | At once | Emails the booker |
+| Payments | `bookings.charge_booking` | The command arrives | At once | Charges the booking through the provider, records the outcome and reports it |
+| Payments | `bookings.refund_booking` | The command arrives | At once | Refunds the booking's charge in full, records it and reports it. A refund of a charge that did not succeed fails, as an alarm, and moves no money |
 
-A worker claims the most overdue job with `SELECT … FOR UPDATE SKIP LOCKED` and runs it inside that transaction (ADR-0012). A job that succeeds is deleted in the same transaction. A job that raises rolls back its own writes and is due again 30 seconds after the attempt began, then after 1, 2, 4 minutes and so on; after ten failures, about four hours, it is marked `dead` and kept with its last error. An email whose send takes longer than a minute is cut off and fails in the same way. If the worker dies, Postgres rolls back its transaction and the job is due again at once. Jobs run in the order they fall due, so an expiry due just after a batch of reminders waits until they have run. Any number of workers can run side by side, since `SKIP LOCKED` hands each job to one of them. `docker compose stop` gives the notifications service's worker two minutes to finish the email in hand, and the booking service's 30 seconds to finish its job or the page of the outbox it is publishing, before they exit.
+A worker claims the most overdue job with `SELECT … FOR UPDATE SKIP LOCKED` and runs it inside that transaction (ADR-0012). A job that succeeds is deleted in the same transaction. A job that raises rolls back its own writes and is due again 30 seconds after the attempt began, then after 1, 2, 4 minutes and so on; after ten failures, about four hours, it is marked `dead` and kept with its last error. An email whose send takes longer than a minute is cut off and fails in the same way. If the worker dies, Postgres rolls back its transaction and the job is due again at once. Jobs run in the order they fall due, so an expiry due just after a batch of reminders waits until they have run. Any number of workers can run side by side, since `SKIP LOCKED` hands each job to one of them. `docker compose stop` gives the notifications service's worker two minutes to finish the email in hand, the payments service's 30 seconds to finish its call to the provider, and the booking service's 30 seconds to finish its job or the page of the outbox it is publishing, before they exit.
 
 Bookings confirmed before Phase 5 had no job table to queue their reminders in; migration 0008 queues them for the bookings that still start more than a day after it runs. Bookings that start sooner get no reminder.
 
@@ -234,7 +248,7 @@ UPDATE jobs SET status = 'queued', attempts = 0, run_at = now() WHERE id = '<job
 
 ## Testing
 
-`make test` runs the suites of every workspace member: the messaging library's, in `libs/messaging/tests`, and each service's, in `services/bookings/tests` and `services/notifications/tests`. `uv run --all-packages --directory <member folder> pytest tests/<suite>` runs one of them.
+`make test` runs the suites of every workspace member: the messaging library's, in `libs/messaging/tests`, and each service's, in `services/bookings/tests`, `services/notifications/tests` and `services/payments/tests`. `uv run --all-packages --directory <member folder> pytest tests/<suite>` runs one of them.
 
 | Suite | What it proves |
 | --- | --- |
@@ -247,6 +261,9 @@ UPDATE jobs SET status = 'queued', attempts = 0, run_at = now() WHERE id = '<job
 | `services/notifications/tests/unit` | The email for each event: the booking on the location's clock, with its zone on a time the clock shows twice, the amount paid in its currency's own unit, and a resource name with line breaks kept on the subject's one line. The mailer against a stand-in mail server that refuses, hangs up or drags out its replies; an address that looks like an encoded word still gets the email itself; and the worker's session limit outlasts the slowest send. |
 | `services/notifications/tests/integration` | Each event, stored as the worker's consumer stores it, is emailed to the booker through a real Mailpit, and a reminder that arrives once its booking has started is dropped. End to end through a real RabbitMQ, a confirmation delivered twice is emailed once. The migrations match the records, and can be undone and applied again. |
 | `services/notifications/tests/concurrency` | A worker process killed while it waits on the mail server loses nothing, and its restarted successor sends the email exactly once. |
+| `services/payments/tests/unit` | What a charge command must carry, and what the worker runs: both commands, publishing their outcomes, the provider's delay and failure rate from its settings, and a session limit that outlasts the provider's timeout. |
+| `services/payments/tests/integration` | Against a real Postgres. The card decides each outcome; a key the provider has seen gets its first answer, a charge or a decline, and no second charge; a charge is refunded once, and only a charge that succeeded can be; and the settings delay a first answer past a caller's patience, while its retry is answered at once, or refuse calls. Each command is charged or declined, recorded and reported once; a second command for a booking already charged never reaches the provider; a charge or refund attempt that fails before or after the provider acted, a decline whose answer was lost included, is retried under the same key and moves money once; a first answer too slow, from a slow card or a slow provider, times out and its retry finds the charge; a command that breaks the contract fails before the provider is asked; and a refund of a charge that did not succeed fails, as an alarm. End to end through a real RabbitMQ, a command delivered twice charges once and replies once. The migrations match the records, and can be undone and applied again. |
+| `services/payments/tests/concurrency` | Four workers racing over ten copies of one command, with the provider slow to give its first answer so that the copies overlap, charge the booking once, and refund it once. A worker process killed after the provider charged, and before its job committed, leaves one charge and one reply. |
 
 ## Performance
 
@@ -310,7 +327,7 @@ The busiest resource has 2,013 bookings, so the last page of its list is about 1
 
 ## Architecture
 
-Holdfast is a uv workspace with one folder per service under `services/`, and the libraries they share under `libs/`. Each member has its own dependencies, settings and tests, and its package in the `holdfast` namespace, such as `holdfast.bookings`; each service also has its own database, migrations and container image. The services share no code but the messaging library, and talk only through RabbitMQ; import-linter forbids each service to import the other.
+Holdfast is a uv workspace with one folder per service under `services/`, and the libraries they share under `libs/`. Each member has its own dependencies, settings and tests, and its package in the `holdfast` namespace, such as `holdfast.bookings`; each service also has its own database, migrations and container image. The services share no code but the messaging library, and talk only through RabbitMQ; import-linter forbids each service to import another.
 
 ```mermaid
 flowchart LR
@@ -321,6 +338,10 @@ flowchart LR
     rabbitmq -->|notifications queue| notificationsworker[notifications-worker]
     notificationsworker --> notificationsdb[(notifications database)]
     notificationsworker -->|SMTP| mailserver[mail server]
+    rabbitmq -->|payments queue| paymentsworker[payments-worker]
+    paymentsworker -->|outcomes from its outbox| rabbitmq
+    paymentsworker --> paymentsdb[(payments database)]
+    paymentsworker --> provider[simulated provider]
 ```
 
 The booking service is a modular monolith with strict layers: each layer may import only the layers below it.
@@ -334,7 +355,7 @@ flowchart TD
     repositories --> domain
 ```
 
-The API and the worker are two entry points into the same services. import-linter enforces the layers in CI: routers never import repositories, and the domain imports no framework. `core` holds cross-cutting infrastructure: configuration, password hashing and tokens. The notifications service is a worker and little else: it turns each event into an email.
+The API and the worker are two entry points into the same services. import-linter enforces the layers in CI: routers never import repositories, and the domain imports no framework. `core` holds cross-cutting infrastructure: configuration, password hashing and tokens. The notifications service is a worker and little else: it turns each event into an email. So is the payments service: it charges and refunds bookings through the provider when asked, and reports each outcome.
 
 ```text
 holdfast-booking-platform/
@@ -357,14 +378,25 @@ holdfast-booking-platform/
 │   │   │   ├── integration/       # through HTTP against a real Postgres
 │   │   │   └── concurrency/       # racing bookings and racing workers
 │   │   └── pyproject.toml         # the service's dependencies and tool settings
-│   └── notifications/             # the notifications service
-│       ├── src/holdfast/notifications/
-│       │   ├── worker.py          # the worker process: events in, emails out
-│       │   ├── events.py          # the events it receives, as it reads them
-│       │   ├── handlers.py        # what it does with each event
-│       │   ├── emails.py          # the email for each event
-│       │   ├── mail.py            # sending over SMTP, with a deadline
-│       │   ├── records.py         # its tables, all from the messaging library
+│   ├── notifications/             # the notifications service
+│   │   ├── src/holdfast/notifications/
+│   │   │   ├── worker.py          # the worker process: events in, emails out
+│   │   │   ├── events.py          # the events it receives, as it reads them
+│   │   │   ├── handlers.py        # what it does with each event
+│   │   │   ├── emails.py          # the email for each event
+│   │   │   ├── mail.py            # sending over SMTP, with a deadline
+│   │   │   ├── records.py         # its tables, all from the messaging library
+│   │   │   └── config.py          # settings
+│   │   ├── migrations/
+│   │   ├── tests/                 # unit, integration and concurrency suites
+│   │   └── pyproject.toml
+│   └── payments/                  # the payments service
+│       ├── src/holdfast/payments/
+│       │   ├── worker.py          # the worker process: commands in, outcomes out
+│       │   ├── messages.py        # the commands it takes and the outcomes it sends
+│       │   ├── handlers.py        # what it does with each command
+│       │   ├── provider.py        # the simulated provider, with books of its own
+│       │   ├── records.py         # its tables: the ledger, the provider's books, the library's
 │       │   └── config.py          # settings
 │       ├── migrations/
 │       ├── tests/                 # unit, integration and concurrency suites
@@ -588,7 +620,7 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 </details>
 
 <details>
-<summary><strong>ADR-0012: Background jobs run from a Postgres table</strong> (Accepted, 2026-11-12; amended 2026-11-16, 2026-11-20, 2026-11-25 and 2026-11-26)</summary>
+<summary><strong>ADR-0012: Background jobs run from a Postgres table</strong> (Accepted, 2026-11-12; amended 2026-11-16, 2026-11-20, 2026-11-25, 2026-11-26 and 2026-11-27)</summary>
 
 **Context.** Phase 5 needs work done later: releasing holds that are not confirmed in time and emailing reminders. A job must exist exactly when the change that needs it commits, since a hold without its expiry job would keep its slot forever. Killing a worker mid-job must lose nothing and duplicate nothing.
 
@@ -600,7 +632,7 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 
 **Decision.** Option 3. Each job runs in a savepoint within the transaction that claimed it. Success deletes the job. Failure rolls back the job's writes and records the attempt, retrying after 30 seconds and doubling the wait each time; the tenth failure marks the job `dead` and keeps it for inspection. An idle worker polls every second. The worker's sessions set `idle_in_transaction_session_timeout`, so a job whose worker's machine vanished without closing its connection is freed after a minute. *Amended 2026-11-16:* after five minutes. smtplib's timeout bounds each reply of a send, not the whole send, so a reminder sent through a slow mail server could outlast one minute: Postgres would end the session mid-job, the attempt would go unrecorded, and the reminder would be sent again about every minute. The limit is now thirty times the timeout for one reply. *Amended 2026-11-20:* that timeout bounds each wait for data from the server, not each reply, so a server that kept answering slowly could hold a send, and the worker with it, for ever. A send is now cut off after a minute, and the limit is five times that; connecting cannot be cut short, but it times out for each address the host resolves to. *Amended 2026-11-25:* the queue moved into the messaging library, `holdfast.messaging`, so that every service's worker runs the same one. The database no longer checks a job's kind (migration 0009): each worker registers a handler for every kind it runs, and a job of a kind its worker has no handler for fails like any other, so that during a deploy a worker that knows the kind can still run it. Each service's worker declares its slowest job, and the idle limit is five times that, or five times the relay's ten-second publish timeout if that is longer.
 
-**Consequences.** A worker killed at any point loses nothing and applies nothing twice: Postgres rolls back its transaction, releases the lock, and the job is due again at once. The concurrency suite proves this by killing a worker process mid-job. Email is the exception: a worker that dies after the mail server accepted a reminder, but before committing, sends it again, so each reminder carries a stable `Message-ID` that mail clients can deduplicate. *Amended 2026-11-16:* so does any other failure between the server accepting a reminder and the job committing, such as a dropped database connection, or the server's reply to the message arriving after smtplib's timeout. A late reply fails the attempt, so a server that always replies late gets one copy per attempt, up to ten. A failure after that reply, such as an unanswered `QUIT`, does not fail the attempt. Each running job holds a connection and an open transaction, so jobs must stay short; a long job would need a lease instead of a lock. A job that crashes the process itself, rather than raising, rolls back its attempt count with everything else, so it would be retried forever instead of becoming dead. *Amended 2026-11-16:* a send that outlasts even the five-minute limit ends the same way. *Amended 2026-11-20:* a send no longer outlasts it: it is cut off after a minute, or as soon as it connects if connecting took longer. *Amended 2026-11-26:* the notifications service sends every email now, from a job of its own (ADR-0015), so the exception is its alone. The booking service's reminder job publishes an event instead, so all its jobs write only to its own database.
+**Consequences.** A worker killed at any point loses nothing and applies nothing twice: Postgres rolls back its transaction, releases the lock, and the job is due again at once. The concurrency suite proves this by killing a worker process mid-job. Email is the exception: a worker that dies after the mail server accepted a reminder, but before committing, sends it again, so each reminder carries a stable `Message-ID` that mail clients can deduplicate. *Amended 2026-11-16:* so does any other failure between the server accepting a reminder and the job committing, such as a dropped database connection, or the server's reply to the message arriving after smtplib's timeout. A late reply fails the attempt, so a server that always replies late gets one copy per attempt, up to ten. A failure after that reply, such as an unanswered `QUIT`, does not fail the attempt. Each running job holds a connection and an open transaction, so jobs must stay short; a long job would need a lease instead of a lock. A job that crashes the process itself, rather than raising, rolls back its attempt count with everything else, so it would be retried forever instead of becoming dead. *Amended 2026-11-16:* a send that outlasts even the five-minute limit ends the same way. *Amended 2026-11-20:* a send no longer outlasts it: it is cut off after a minute, or as soon as it connects if connecting took longer. *Amended 2026-11-26:* the notifications service sends every email now, from a job of its own (ADR-0015), so the exception is its alone. The booking service's reminder job publishes an event instead, so all its jobs write only to its own database. *Amended 2026-11-27:* the payments service's jobs call a payment provider, which, like a mail server, acts outside the job's transaction. Each call names the booking's id as its idempotency key, and the provider answers a key it has seen as it did the first time, so a job that fails after the provider acted moves no money when it runs again.
 
 </details>
 
@@ -652,6 +684,23 @@ The `/health` endpoint is infrastructure, not a use case, so it checks the datab
 **Decision.** Option 3, as the library `holdfast.messaging`, with aio-pika as the RabbitMQ client. One direct exchange, `holdfast`, routes each message by its type, such as `bookings.booking_confirmed`, and each receiving service has one durable classic queue, bound to the types it handles. A message travels in an envelope of id, type, time and data; a delivery that is not one is kept as a dead job rather than dropped. A received message runs as a job of the receiving service, so it is retried, and kept once it dies, exactly like the service's own jobs (ADR-0012). The booking service publishes facts about bookings and orchestrates its own work; the notifications service reacts to them, knowing nothing of the booking service but the data its events carry.
 
 **Consequences.** An event is published if, and only if, its change commits, whether the sender's worker or the broker fails. Delivery is at least once: a relay that stops after publishing a row but before deleting it publishes it again, and RabbitMQ redelivers what a consumer did not acknowledge. The inbox drops every copy that arrives within seven days of the first, so a receiver acts on each message once. Messages are not ordered, so a receiver must not rely on one event arriving before another. An event's data is a contract between the services: each receiver declares only the fields it reads and ignores the rest, so a sender may add fields but not rename or remove them. The notifications service keeps no booking data, so an email shows the booking as it was when its event was published. A service that publishes pays with an outbox table and a relay in its worker, and one that receives with a table of received ids and a consumer; a message waits for the relay's next poll, up to a second, before it leaves.
+
+</details>
+
+<details>
+<summary><strong>ADR-0016: Payments and notifications are the services extracted, and bookings stays whole</strong> (Accepted, 2026-11-27)</summary>
+
+**Context.** Phase 6 splits two services out of the booking service. A split trades one transaction and calls within one process for a database, a queue, an image and eventual consistency, so it pays only for work that waits on an outside system failing on its own schedule, owns data nobody else reads, and needs nothing but asynchronous messages.
+
+**Options considered.**
+
+1. *A modular monolith,* with email and payments as modules and jobs of the booking service.
+2. *Splitting the booking domain itself,* such as availability or accounts.
+3. *Extracting the two edges that talk to outside systems:* email and payments.
+
+**Decision.** Option 3. The notifications service owns SMTP and keeps no booking data: events in, emails out. The payments service owns the ledger of charges, the provider and, one day, its credentials, and knows a booking only by its id: commands in, outcomes out. Bookings, accounts, organisations and availability stay together: no double-booking and tenant isolation rest on one Postgres transaction, its exclusion constraint and its foreign keys, and splitting off authentication would put a network call in front of every request.
+
+**Consequences.** A slow or failing mail server or payment provider can no longer hold up the API, a hold or its expiry, and each service deploys on its own. The cost is three databases, three images and three workers to run, and a payment that completes after the request that asks for it. The messages between the services become contracts that each side must keep.
 
 </details>
 

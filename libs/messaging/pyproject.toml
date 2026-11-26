@@ -30,7 +30,12 @@ explicit_package_bases = true
 [tool.importlinter]
 # The services are roots too, so that the last contract can name them: seen from the library
 # alone, they are parts of an external namespace that import-linter cannot see into.
-root_packages = ["holdfast.messaging", "holdfast.bookings", "holdfast.notifications"]
+root_packages = [
+    "holdfast.messaging",
+    "holdfast.bookings",
+    "holdfast.notifications",
+    "holdfast.payments",
+]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -47,7 +52,7 @@ layers = [
 name = "The library knows nothing of the services that use it"
 type = "forbidden"
 source_modules = ["holdfast.messaging"]
-forbidden_modules = ["holdfast.bookings", "holdfast.notifications"]
+forbidden_modules = ["holdfast.bookings", "holdfast.notifications", "holdfast.payments"]
 
 [tool.pytest]
 strict = true

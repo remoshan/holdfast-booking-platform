@@ -4,6 +4,7 @@
 # install only that member and leave out the shared development tools.
 IN_BOOKINGS = uv run --all-packages --directory services/bookings
 IN_NOTIFICATIONS = uv run --all-packages --directory services/notifications
+IN_PAYMENTS = uv run --all-packages --directory services/payments
 IN_MESSAGING = uv run --all-packages --directory libs/messaging
 
 .PHONY: install up down migrate seed explain format imports lint typecheck test check
@@ -23,6 +24,7 @@ down:
 migrate:
 	docker compose run --build --rm bookings-migrate
 	docker compose run --build --rm notifications-migrate
+	docker compose run --build --rm payments-migrate
 
 seed:
 	$(IN_BOOKINGS) python scripts/seed.py
@@ -38,6 +40,7 @@ imports:
 	$(IN_MESSAGING) lint-imports
 	$(IN_BOOKINGS) lint-imports
 	$(IN_NOTIFICATIONS) lint-imports
+	$(IN_PAYMENTS) lint-imports
 
 lint: imports
 	uv run ruff check
@@ -47,10 +50,12 @@ typecheck:
 	$(IN_MESSAGING) mypy
 	$(IN_BOOKINGS) mypy
 	$(IN_NOTIFICATIONS) mypy
+	$(IN_PAYMENTS) mypy
 
 test:
 	$(IN_MESSAGING) pytest
 	$(IN_BOOKINGS) pytest
 	$(IN_NOTIFICATIONS) pytest
+	$(IN_PAYMENTS) pytest
 
 check: lint typecheck test

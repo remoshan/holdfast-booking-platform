@@ -1,0 +1,71 @@
+[project]
+name = "holdfast-payments"
+version = "0.1.0"
+description = "Holdfast's payments service: charges and refunds bookings through a simulated provider, at most once each."
+license = "MIT"
+authors = [{ name = "Francis Remoshan" }]
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "holdfast-messaging",
+    "pydantic>=2.14.2",
+    "pydantic-settings>=2.16.2",
+    "sqlalchemy[asyncio]>=2.1.6",
+]
+
+[tool.uv.sources]
+holdfast-messaging = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Every service is one part of the holdfast namespace package, so there is no holdfast/__init__.py.
+module-name = "holdfast.payments"
+
+[tool.alembic]
+# Relative to this file, not to the folder Alembic runs in.
+script_location = "%(here)s/migrations"
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests", "migrations"]
+mypy_path = ["src"]
+explicit_package_bases = true
+
+[tool.importlinter]
+# The other parts of the holdfast namespace are roots too, so that contracts can name them.
+root_packages = [
+    "holdfast.payments",
+    "holdfast.messaging",
+    "holdfast.bookings",
+    "holdfast.notifications",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Modules only import the modules below them"
+type = "layers"
+layers = [
+    "holdfast.payments.worker",
+    "holdfast.payments.handlers",
+    "holdfast.payments.provider",
+    "holdfast.payments.messages | holdfast.payments.records",
+]
+
+[[tool.importlinter.contracts]]
+name = "The service knows no other service"
+type = "forbidden"
+source_modules = ["holdfast.payments"]
+forbidden_modules = ["holdfast.bookings", "holdfast.notifications"]
+
+[tool.pytest]
+strict = true
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+# Lets tests import what they share, from tests.support.
+pythonpath = ["."]
+filterwarnings = ["error"]

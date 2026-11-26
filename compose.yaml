@@ -14,11 +14,21 @@ x-notifications-image: &notifications-image
       SERVICE: notifications
   image: holdfast-notifications:local
 
+x-payments-image: &payments-image
+  build:
+    context: .
+    args:
+      SERVICE: payments
+  image: holdfast-payments:local
+
 x-bookings-database-url: &bookings-database-url
   DATABASE_URL: postgresql+asyncpg://holdfast:holdfast@bookings-database:5432/holdfast
 
 x-notifications-database-url: &notifications-database-url
   DATABASE_URL: postgresql+asyncpg://notifications:notifications@notifications-database:5432/notifications
+
+x-payments-database-url: &payments-database-url
+  DATABASE_URL: postgresql+asyncpg://payments:payments@payments-database:5432/payments
 
 x-rabbitmq-url: &rabbitmq-url
   RABBITMQ_URL: amqp://holdfast:holdfast@rabbitmq:5672/
@@ -53,6 +63,20 @@ services:
       - notifications-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready --username=notifications --dbname=notifications"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  payments-database:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    volumes:
+      - payments-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=payments --dbname=payments"]
       interval: 2s
       timeout: 5s
       retries: 15
@@ -151,7 +175,36 @@ services:
       rabbitmq:
         condition: service_started
 
+  payments-migrate:
+    <<: *payments-image
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *payments-database-url
+    depends_on:
+      payments-database:
+        condition: service_healthy
+
+  payments-worker:
+    <<: *payments-image
+    command: ["python", "-m", "holdfast.payments.worker"]
+    # Longer than the slowest job, a provider call cut off at PROVIDER_TIMEOUT, so that
+    # `docker compose stop` lets the job in hand finish.
+    stop_grace_period: 30s
+    environment:
+      <<: [*payments-database-url, *rabbitmq-url]
+      # For trying failures out by hand: set them in the shell that runs `make up`.
+      PROVIDER_DELAY_SECONDS: ${PROVIDER_DELAY_SECONDS:-0}
+      PROVIDER_FAILURE_RATE: ${PROVIDER_FAILURE_RATE:-0}
+    depends_on:
+      payments-migrate:
+        condition: service_completed_successfully
+      # Started, not healthy: the commands already received are carried out even while the
+      # broker is down.
+      rabbitmq:
+        condition: service_started
+
 volumes:
   database-data:
   notifications-data:
+  payments-data:
   rabbitmq-data:
