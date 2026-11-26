@@ -35,6 +35,18 @@ type StoredJobs = Callable[[], Awaitable[list[JobRecord]]]
         ),
         ("bookings.booking_cancelled", {}, "Booking cancelled", "cancelled"),
         ("bookings.reminder_due", {}, "Reminder", "reminder"),
+        (
+            "bookings.payment_failed",
+            {"price": 2000, "currency": "EUR"},
+            "Payment failed",
+            "payment_failed",
+        ),
+        (
+            "bookings.refund_issued",
+            {"amount": 2000, "currency": "EUR"},
+            "Refund issued",
+            "refund_issued",
+        ),
     ],
 )
 async def test_each_event_is_emailed_to_the_booker(

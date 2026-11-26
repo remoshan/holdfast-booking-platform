@@ -9,6 +9,8 @@ from pydantic import AwareDatetime, BaseModel
 BOOKING_CONFIRMED = "bookings.booking_confirmed"
 BOOKING_CANCELLED = "bookings.booking_cancelled"
 REMINDER_DUE = "bookings.reminder_due"
+PAYMENT_FAILED = "bookings.payment_failed"
+REFUND_ISSUED = "bookings.refund_issued"
 
 
 class BookingDetails(BaseModel):
@@ -36,3 +38,17 @@ class BookingCancelled(BookingDetails):
 
 class ReminderDue(BookingDetails):
     pass
+
+
+class PaymentFailed(BookingDetails):
+    """The booker's payment was declined, so the booking was not made and nothing was taken."""
+
+    price: int
+    """What the booking would have cost, in minor units of the currency."""
+    currency: str
+
+
+class RefundIssued(BookingDetails):
+    amount: int
+    """What was refunded, in minor units of the currency: the whole charge."""
+    currency: str

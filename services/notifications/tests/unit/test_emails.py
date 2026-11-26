@@ -9,7 +9,13 @@ from uuid import uuid4
 import pytest
 
 from holdfast.notifications import emails
-from holdfast.notifications.events import BookingCancelled, BookingConfirmed, ReminderDue
+from holdfast.notifications.events import (
+    BookingCancelled,
+    BookingConfirmed,
+    PaymentFailed,
+    RefundIssued,
+    ReminderDue,
+)
 
 LINE_SEPARATOR = chr(0x2028)
 
@@ -73,6 +79,30 @@ def test_a_reminder_asks_the_booker_to_cancel_a_booking_they_no_longer_need() ->
     assert email.subject == "Reminder: Room 1, Tue 03 Nov at 09:00"
     assert "please cancel it so that someone else can book it" in email.body
     assert email.message_id == f"<reminder.{event.booking_id}@holdfast>"
+
+
+def test_a_failed_payment_says_nothing_was_charged_and_what_the_booking_would_have_cost() -> None:
+    event = PaymentFailed.model_validate(_event(price=12345, currency="KWD"))
+
+    email = emails.payment_failed(event)
+
+    assert email.subject == "Payment failed: Room 1, Tue 03 Nov at 09:00"
+    assert "Your payment was declined, so this booking was not made and nothing was charged:" in (
+        email.body
+    )
+    assert "  Price: 12.345 KWD\n" in email.body
+    assert email.message_id == f"<payment_failed.{event.booking_id}@holdfast>"
+
+
+def test_a_refund_says_how_much_was_refunded() -> None:
+    event = RefundIssued.model_validate(_event(amount=2000))
+
+    email = emails.refund_issued(event)
+
+    assert email.subject == "Refund issued: Room 1, Tue 03 Nov at 09:00"
+    assert "Your payment for this booking has been refunded in full:" in email.body
+    assert "  Refunded: 20.00 EUR\n" in email.body
+    assert email.message_id == f"<refund_issued.{event.booking_id}@holdfast>"
 
 
 def test_a_time_the_clock_shows_twice_carries_its_zone() -> None:

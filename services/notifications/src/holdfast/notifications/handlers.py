@@ -20,9 +20,13 @@ from holdfast.notifications import emails
 from holdfast.notifications.events import (
     BOOKING_CANCELLED,
     BOOKING_CONFIRMED,
+    PAYMENT_FAILED,
+    REFUND_ISSUED,
     REMINDER_DUE,
     BookingCancelled,
     BookingConfirmed,
+    PaymentFailed,
+    RefundIssued,
     ReminderDue,
 )
 from holdfast.notifications.mail import Mailer
@@ -33,6 +37,8 @@ def handlers(mailer: Mailer) -> dict[str, Handler]:
     return {
         BOOKING_CONFIRMED: partial(_send, mailer, BookingConfirmed, emails.booking_confirmed),
         BOOKING_CANCELLED: partial(_send, mailer, BookingCancelled, emails.booking_cancelled),
+        PAYMENT_FAILED: partial(_send, mailer, PaymentFailed, emails.payment_failed),
+        REFUND_ISSUED: partial(_send, mailer, RefundIssued, emails.refund_issued),
         REMINDER_DUE: partial(_send_reminder, mailer),
     }
 

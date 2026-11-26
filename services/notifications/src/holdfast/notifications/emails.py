@@ -10,6 +10,8 @@ from holdfast.notifications.events import (
     BookingCancelled,
     BookingConfirmed,
     BookingDetails,
+    PaymentFailed,
+    RefundIssued,
     ReminderDue,
 )
 
@@ -72,6 +74,28 @@ def reminder(event: ReminderDue) -> Email:
         "This is a reminder of your booking:",
         [],
         "If you no longer need it, please cancel it so that someone else can book it.\n\n",
+    )
+
+
+def payment_failed(event: PaymentFailed) -> Email:
+    return _email(
+        event,
+        "payment_failed",
+        "Payment failed",
+        "Your payment was declined, so this booking was not made and nothing was charged:",
+        [f"Price: {format_amount(event.price, event.currency)}"],
+        "If you still want it, please book it again.\n\n",
+    )
+
+
+def refund_issued(event: RefundIssued) -> Email:
+    return _email(
+        event,
+        "refund_issued",
+        "Refund issued",
+        "Your payment for this booking has been refunded in full:",
+        [f"Refunded: {format_amount(event.amount, event.currency)}"],
+        "",
     )
 
 
